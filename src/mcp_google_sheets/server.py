@@ -436,32 +436,57 @@ def unmerge_cells(spreadsheet_id: str, sheet: str, range: str, ctx: Context = No
 def auto_resize(spreadsheet_id: str, sheet: str, columns: Optional[str] = None, rows: Optional[str] = None, ctx: Context = None) -> Dict[str, Any]:
     """
     Auto-resize columns/rows to fit content.
-    columns: "A:D" or "B:B", rows: "1:10" or "5:5"
+    columns: "A:D", "B:B", or "all" to resize all columns
+    rows: "1:10", "5:5", or "all" to resize all rows
     """
     sheets_service = ctx.request_context.lifespan_context.sheets_service
     sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
     requests = []
 
     if columns:
-        col_match = re.match(r'^([A-Za-z]+):([A-Za-z]+)$', columns)
-        if col_match:
-            requests.append({"autoResizeDimensions": {"dimensions": {
-                "sheetId": sheet_id, "dimension": "COLUMNS",
-                "startIndex": _col_to_index(col_match.group(1)),
-                "endIndex": _col_to_index(col_match.group(2)) + 1
-            }}})
+        if columns.lower() == "all":
+            # Get sheet properties to find column count
+            spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+            for s in spreadsheet['sheets']:
+                if s['properties']['sheetId'] == sheet_id:
+                    col_count = s['properties'].get('gridProperties', {}).get('columnCount', 26)
+                    requests.append({"autoResizeDimensions": {"dimensions": {
+                        "sheetId": sheet_id, "dimension": "COLUMNS",
+                        "startIndex": 0, "endIndex": col_count
+                    }}})
+                    break
+        else:
+            col_match = re.match(r'^([A-Za-z]+):([A-Za-z]+)$', columns)
+            if col_match:
+                requests.append({"autoResizeDimensions": {"dimensions": {
+                    "sheetId": sheet_id, "dimension": "COLUMNS",
+                    "startIndex": _col_to_index(col_match.group(1)),
+                    "endIndex": _col_to_index(col_match.group(2)) + 1
+                }}})
 
     if rows:
-        row_match = re.match(r'^(\d+):(\d+)$', rows)
-        if row_match:
-            requests.append({"autoResizeDimensions": {"dimensions": {
-                "sheetId": sheet_id, "dimension": "ROWS",
-                "startIndex": int(row_match.group(1)) - 1,
-                "endIndex": int(row_match.group(2))
-            }}})
+        if rows.lower() == "all":
+            # Get sheet properties to find row count
+            spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+            for s in spreadsheet['sheets']:
+                if s['properties']['sheetId'] == sheet_id:
+                    row_count = s['properties'].get('gridProperties', {}).get('rowCount', 1000)
+                    requests.append({"autoResizeDimensions": {"dimensions": {
+                        "sheetId": sheet_id, "dimension": "ROWS",
+                        "startIndex": 0, "endIndex": row_count
+                    }}})
+                    break
+        else:
+            row_match = re.match(r'^(\d+):(\d+)$', rows)
+            if row_match:
+                requests.append({"autoResizeDimensions": {"dimensions": {
+                    "sheetId": sheet_id, "dimension": "ROWS",
+                    "startIndex": int(row_match.group(1)) - 1,
+                    "endIndex": int(row_match.group(2))
+                }}})
 
     if not requests:
-        return {"error": "Specify columns (A:D) and/or rows (1:10)"}
+        return {"error": "Specify columns (A:D or 'all') and/or rows (1:10 or 'all')"}
 
     return sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
 
@@ -603,13 +628,15 @@ def batch_format(spreadsheet_id: str,
             - v_align: "top", "middle", "bottom"
             - wrap: "overflow", "clip", "wrap"
             - number_format: pattern string
+            - border: border style - "solid", "dashed", "dotted", "double", "none"
+            - border_color: border color (default: "black")
+            - border_sides: "all", "outer", "inner", or "top,bottom,left,right"
 
     Example:
         batch_format(id, "Sheet1", [
-            {"range": "A1:Z1", "bold": True, "bg_color": "light_blue"},
+            {"range": "A1:Z1", "bold": True, "bg_color": "light_blue", "border": "solid", "border_sides": "bottom"},
             {"range": "A3:A100", "font_color": "blue"},
-            {"range": "B3:B100", "font_color": "green"},
-            {"range": "C3:C100", "font_color": "orange"}
+            {"range": "B3:B100", "font_color": "green", "border": "dashed", "border_color": "gray"}
         ])
     """
     sheets_service = ctx.request_context.lifespan_context.sheets_service
@@ -666,6 +693,7 @@ def batch_format(spreadsheet_id: str,
             cell_format["numberFormat"] = {"type": "NUMBER", "pattern": fmt['number_format']}
             fields.append("userEnteredFormat.numberFormat")
 
+        # Add cell format request if any formatting specified
         if cell_format and fields:
             requests.append({
                 "repeatCell": {
@@ -675,6 +703,32 @@ def batch_format(spreadsheet_id: str,
                 }
             })
 
+        # Border formatting (separate request type)
+        if fmt.get('border'):
+            style = fmt.get('border', 'solid')
+            color = fmt.get('border_color', 'black')
+            sides = fmt.get('border_sides', 'all')
+
+            border_style = {"solid": "SOLID", "dashed": "DASHED", "dotted": "DOTTED", "double": "DOUBLE", "none": "NONE"}.get(style.lower(), "SOLID")
+            border = {"style": border_style, "color": _parse_color(color)}
+
+            req = {"range": _grid_range(sheet_id, cell_range)}
+            s = sides.lower()
+
+            if s == "all":
+                req.update({"top": border, "bottom": border, "left": border, "right": border, "innerHorizontal": border, "innerVertical": border})
+            elif s == "outer":
+                req.update({"top": border, "bottom": border, "left": border, "right": border})
+            elif s == "inner":
+                req.update({"innerHorizontal": border, "innerVertical": border})
+            else:
+                for side in s.split(","):
+                    side = side.strip()
+                    if side in ["top", "bottom", "left", "right"]:
+                        req[side] = border
+
+            requests.append({"updateBorders": req})
+
     if not requests:
         return {"error": "No valid formatting operations specified"}
 
@@ -682,6 +736,153 @@ def batch_format(spreadsheet_id: str,
         spreadsheetId=spreadsheet_id,
         body={"requests": requests}
     ).execute()
+
+
+@mcp.tool()
+def write_sheet(spreadsheet_id: str,
+                sheet: str,
+                range: str,
+                data: List[List[Any]],
+                formats: Optional[List[Dict[str, Any]]] = None,
+                auto_resize_columns: bool = False,
+                ctx: Context = None) -> Dict[str, Any]:
+    """
+    Write data and optionally apply formatting in a single operation.
+    Combines update_cells + batch_format + auto_resize.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID
+        sheet: Sheet name (e.g., "Sheet1")
+        range: Starting cell in A1 notation (e.g., "A1")
+        data: 2D array of values to write
+        formats: Optional list of format specs (same as batch_format, including borders)
+        auto_resize_columns: Auto-resize columns after writing (default: False)
+
+    Example:
+        write_sheet(id, "Sheet1", "A1",
+            data=[["Name", "Value"], ["Foo", 100], ["Bar", 200]],
+            formats=[
+                {"range": "A1:B1", "bold": True, "bg_color": "light_blue", "border": "solid", "border_sides": "bottom"},
+                {"range": "A1:B3", "border": "solid", "border_sides": "outer"}
+            ],
+            auto_resize_columns=True
+        )
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    results = {}
+
+    # Step 1: Write data
+    write_result = sheets_service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id, range=f"{sheet}!{range}",
+        valueInputOption='USER_ENTERED', body={'values': data}
+    ).execute()
+    results['write'] = write_result
+
+    # Step 2: Apply formatting if specified
+    if formats or auto_resize_columns:
+        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+        requests = []
+
+        # Format requests (reuse batch_format logic)
+        if formats:
+            for fmt in formats:
+                cell_range = fmt.get('range')
+                if not cell_range:
+                    continue
+
+                cell_format = {}
+                text_format = {}
+                fields = []
+
+                if fmt.get('bold') is not None:
+                    text_format["bold"] = fmt['bold']
+                if fmt.get('italic') is not None:
+                    text_format["italic"] = fmt['italic']
+                if fmt.get('underline') is not None:
+                    text_format["underline"] = fmt['underline']
+                if fmt.get('strikethrough') is not None:
+                    text_format["strikethrough"] = fmt['strikethrough']
+                if fmt.get('font_size') is not None:
+                    text_format["fontSize"] = fmt['font_size']
+                if fmt.get('font_color'):
+                    text_format["foregroundColor"] = _parse_color(fmt['font_color'])
+
+                if text_format:
+                    cell_format["textFormat"] = text_format
+                    fields.append("userEnteredFormat.textFormat")
+
+                if fmt.get('bg_color'):
+                    cell_format["backgroundColor"] = _parse_color(fmt['bg_color'])
+                    fields.append("userEnteredFormat.backgroundColor")
+
+                if fmt.get('h_align'):
+                    cell_format["horizontalAlignment"] = {"left": "LEFT", "center": "CENTER", "right": "RIGHT"}.get(fmt['h_align'].lower(), fmt['h_align'].upper())
+                    fields.append("userEnteredFormat.horizontalAlignment")
+                if fmt.get('v_align'):
+                    cell_format["verticalAlignment"] = {"top": "TOP", "middle": "MIDDLE", "bottom": "BOTTOM"}.get(fmt['v_align'].lower(), fmt['v_align'].upper())
+                    fields.append("userEnteredFormat.verticalAlignment")
+
+                if fmt.get('wrap'):
+                    cell_format["wrapStrategy"] = {"overflow": "OVERFLOW_CELL", "clip": "CLIP", "wrap": "WRAP"}.get(fmt['wrap'].lower(), fmt['wrap'].upper())
+                    fields.append("userEnteredFormat.wrapStrategy")
+
+                if fmt.get('number_format'):
+                    cell_format["numberFormat"] = {"type": "NUMBER", "pattern": fmt['number_format']}
+                    fields.append("userEnteredFormat.numberFormat")
+
+                if cell_format and fields:
+                    requests.append({
+                        "repeatCell": {
+                            "range": _grid_range(sheet_id, cell_range),
+                            "cell": {"userEnteredFormat": cell_format},
+                            "fields": ",".join(fields)
+                        }
+                    })
+
+                # Border formatting
+                if fmt.get('border'):
+                    style = fmt.get('border', 'solid')
+                    color = fmt.get('border_color', 'black')
+                    sides = fmt.get('border_sides', 'all')
+
+                    border_style = {"solid": "SOLID", "dashed": "DASHED", "dotted": "DOTTED", "double": "DOUBLE", "none": "NONE"}.get(style.lower(), "SOLID")
+                    border = {"style": border_style, "color": _parse_color(color)}
+
+                    req = {"range": _grid_range(sheet_id, cell_range)}
+                    s = sides.lower()
+
+                    if s == "all":
+                        req.update({"top": border, "bottom": border, "left": border, "right": border, "innerHorizontal": border, "innerVertical": border})
+                    elif s == "outer":
+                        req.update({"top": border, "bottom": border, "left": border, "right": border})
+                    elif s == "inner":
+                        req.update({"innerHorizontal": border, "innerVertical": border})
+                    else:
+                        for side in s.split(","):
+                            side = side.strip()
+                            if side in ["top", "bottom", "left", "right"]:
+                                req[side] = border
+
+                    requests.append({"updateBorders": req})
+
+        # Auto-resize columns
+        if auto_resize_columns:
+            if data and data[0]:
+                start_col = _col_to_index(re.match(r'^([A-Za-z]+)', range).group(1))
+                end_col = start_col + len(data[0])
+                requests.append({"autoResizeDimensions": {"dimensions": {
+                    "sheetId": sheet_id, "dimension": "COLUMNS",
+                    "startIndex": start_col, "endIndex": end_col
+                }}})
+
+        if requests:
+            format_result = sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": requests}
+            ).execute()
+            results['format'] = format_result
+
+    return results
 
 
 # =============================================================================
