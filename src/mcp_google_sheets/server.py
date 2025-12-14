@@ -582,6 +582,108 @@ def get_colors(ctx: Context = None) -> Dict[str, Dict[str, float]]:
     return COLORS
 
 
+@mcp.tool()
+def batch_format(spreadsheet_id: str,
+                 sheet: str,
+                 formats: List[Dict[str, Any]],
+                 ctx: Context = None) -> Dict[str, Any]:
+    """
+    Apply multiple formatting operations in a single API call.
+    Much more efficient than calling format_cells multiple times.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID
+        sheet: Sheet name (e.g., "Sheet1")
+        formats: List of format specs, each containing:
+            - range: Cell range in A1 notation (e.g., "A1:B5")
+            - bold, italic, underline, strikethrough: bool
+            - font_size: int
+            - font_color, bg_color: color string (named, hex, or rgb)
+            - h_align: "left", "center", "right"
+            - v_align: "top", "middle", "bottom"
+            - wrap: "overflow", "clip", "wrap"
+            - number_format: pattern string
+
+    Example:
+        batch_format(id, "Sheet1", [
+            {"range": "A1:Z1", "bold": True, "bg_color": "light_blue"},
+            {"range": "A3:A100", "font_color": "blue"},
+            {"range": "B3:B100", "font_color": "green"},
+            {"range": "C3:C100", "font_color": "orange"}
+        ])
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    requests = []
+
+    for fmt in formats:
+        cell_range = fmt.get('range')
+        if not cell_range:
+            continue
+
+        cell_format = {}
+        text_format = {}
+        fields = []
+
+        # Text formatting
+        if fmt.get('bold') is not None:
+            text_format["bold"] = fmt['bold']
+        if fmt.get('italic') is not None:
+            text_format["italic"] = fmt['italic']
+        if fmt.get('underline') is not None:
+            text_format["underline"] = fmt['underline']
+        if fmt.get('strikethrough') is not None:
+            text_format["strikethrough"] = fmt['strikethrough']
+        if fmt.get('font_size') is not None:
+            text_format["fontSize"] = fmt['font_size']
+        if fmt.get('font_color'):
+            text_format["foregroundColor"] = _parse_color(fmt['font_color'])
+
+        if text_format:
+            cell_format["textFormat"] = text_format
+            fields.append("userEnteredFormat.textFormat")
+
+        # Background
+        if fmt.get('bg_color'):
+            cell_format["backgroundColor"] = _parse_color(fmt['bg_color'])
+            fields.append("userEnteredFormat.backgroundColor")
+
+        # Alignment
+        if fmt.get('h_align'):
+            cell_format["horizontalAlignment"] = {"left": "LEFT", "center": "CENTER", "right": "RIGHT"}.get(fmt['h_align'].lower(), fmt['h_align'].upper())
+            fields.append("userEnteredFormat.horizontalAlignment")
+        if fmt.get('v_align'):
+            cell_format["verticalAlignment"] = {"top": "TOP", "middle": "MIDDLE", "bottom": "BOTTOM"}.get(fmt['v_align'].lower(), fmt['v_align'].upper())
+            fields.append("userEnteredFormat.verticalAlignment")
+
+        # Wrap
+        if fmt.get('wrap'):
+            cell_format["wrapStrategy"] = {"overflow": "OVERFLOW_CELL", "clip": "CLIP", "wrap": "WRAP"}.get(fmt['wrap'].lower(), fmt['wrap'].upper())
+            fields.append("userEnteredFormat.wrapStrategy")
+
+        # Number format
+        if fmt.get('number_format'):
+            cell_format["numberFormat"] = {"type": "NUMBER", "pattern": fmt['number_format']}
+            fields.append("userEnteredFormat.numberFormat")
+
+        if cell_format and fields:
+            requests.append({
+                "repeatCell": {
+                    "range": _grid_range(sheet_id, cell_range),
+                    "cell": {"userEnteredFormat": cell_format},
+                    "fields": ",".join(fields)
+                }
+            })
+
+    if not requests:
+        return {"error": "No valid formatting operations specified"}
+
+    return sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": requests}
+    ).execute()
+
+
 # =============================================================================
 # DATA TOOLS (ORIGINAL, PRESERVED)
 # =============================================================================
