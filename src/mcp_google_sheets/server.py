@@ -962,6 +962,280 @@ def add_columns(spreadsheet_id: str, sheet: str, count: int, start_column: Optio
 
 
 # =============================================================================
+# QUERY/FILTER OPERATIONS
+# =============================================================================
+
+@mcp.tool()
+def filter_rows(spreadsheet_id: str, sheet: str, column: str, operator: str, value: str,
+                range: Optional[str] = None, include_header: bool = True, ctx: Context = None) -> Dict[str, Any]:
+    """
+    Filter rows by column value.
+
+    column: Column letter (A, B, C...) or header name to filter on
+    operator: equals, not_equals, contains, not_contains, starts_with, ends_with, gt, gte, lt, lte, empty, not_empty, regex
+    value: Value to compare against (ignored for empty/not_empty)
+    range: Optional A1 range to filter within (default: entire sheet)
+    include_header: Include header row in results (default: True)
+
+    Returns: {filtered_rows: [[...]], total_rows: N, matched_rows: N, column_index: N}
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    full_range = f"{sheet}!{range}" if range else sheet
+
+    result = sheets_service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=full_range).execute()
+    rows = result.get('values', [])
+
+    if not rows:
+        return {'filtered_rows': [], 'total_rows': 0, 'matched_rows': 0, 'column_index': -1}
+
+    # Determine column index - either by letter or by header name
+    header = rows[0] if rows else []
+    col_idx = -1
+
+    if len(column) <= 2 and column.isalpha():
+        col_idx = _col_to_index(column.upper())
+    else:
+        # Try to find by header name (case-insensitive)
+        for i, h in enumerate(header):
+            if str(h).lower() == column.lower():
+                col_idx = i
+                break
+
+    if col_idx == -1:
+        return {'error': f'Column "{column}" not found', 'filtered_rows': [], 'total_rows': len(rows), 'matched_rows': 0, 'column_index': -1}
+
+    def matches(cell_value: str) -> bool:
+        cell_str = str(cell_value).strip() if cell_value else ''
+        val = str(value).strip() if value else ''
+        cell_lower = cell_str.lower()
+        val_lower = val.lower()
+
+        if operator == 'equals':
+            return cell_lower == val_lower
+        elif operator == 'not_equals':
+            return cell_lower != val_lower
+        elif operator == 'contains':
+            return val_lower in cell_lower
+        elif operator == 'not_contains':
+            return val_lower not in cell_lower
+        elif operator == 'starts_with':
+            return cell_lower.startswith(val_lower)
+        elif operator == 'ends_with':
+            return cell_lower.endswith(val_lower)
+        elif operator == 'empty':
+            return cell_str == ''
+        elif operator == 'not_empty':
+            return cell_str != ''
+        elif operator == 'regex':
+            import re
+            return bool(re.search(val, cell_str, re.IGNORECASE))
+        elif operator in ('gt', 'gte', 'lt', 'lte'):
+            try:
+                cell_num = float(cell_str.replace(',', ''))
+                val_num = float(val.replace(',', ''))
+                if operator == 'gt':
+                    return cell_num > val_num
+                elif operator == 'gte':
+                    return cell_num >= val_num
+                elif operator == 'lt':
+                    return cell_num < val_num
+                elif operator == 'lte':
+                    return cell_num <= val_num
+            except (ValueError, TypeError):
+                return False
+        return False
+
+    # Filter rows (skip header for matching, but include in output if requested)
+    filtered = []
+    if include_header and rows:
+        filtered.append(rows[0])
+
+    data_rows = rows[1:] if rows else []
+    for row in data_rows:
+        cell_val = row[col_idx] if col_idx < len(row) else ''
+        if matches(cell_val):
+            filtered.append(row)
+
+    matched_count = len(filtered) - (1 if include_header and filtered else 0)
+    return {
+        'filtered_rows': filtered,
+        'total_rows': len(rows),
+        'matched_rows': matched_count,
+        'column_index': col_idx
+    }
+
+
+@mcp.tool()
+def search_cells(spreadsheet_id: str, sheet: str, search_term: str,
+                 case_sensitive: bool = False, range: Optional[str] = None,
+                 max_results: int = 100, ctx: Context = None) -> Dict[str, Any]:
+    """
+    Search for cells containing text.
+
+    search_term: Text to search for
+    case_sensitive: Match case exactly (default: False)
+    range: Optional A1 range to search within
+    max_results: Maximum number of matches to return (default: 100)
+
+    Returns: {matches: [{row: N, column: "A", cell: "A1", value: "..."}], total_matches: N}
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    full_range = f"{sheet}!{range}" if range else sheet
+
+    result = sheets_service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=full_range).execute()
+    rows = result.get('values', [])
+
+    matches = []
+    search = search_term if case_sensitive else search_term.lower()
+
+    for row_idx, row in enumerate(rows):
+        for col_idx, cell in enumerate(row):
+            cell_str = str(cell) if cell else ''
+            compare_str = cell_str if case_sensitive else cell_str.lower()
+
+            if search in compare_str:
+                col_letter = ''
+                idx = col_idx
+                while idx >= 0:
+                    col_letter = chr(65 + idx % 26) + col_letter
+                    idx = idx // 26 - 1
+
+                matches.append({
+                    'row': row_idx + 1,
+                    'column': col_letter,
+                    'cell': f"{col_letter}{row_idx + 1}",
+                    'value': cell_str
+                })
+
+                if len(matches) >= max_results:
+                    return {'matches': matches, 'total_matches': len(matches), 'truncated': True}
+
+    return {'matches': matches, 'total_matches': len(matches), 'truncated': False}
+
+
+@mcp.tool()
+def query_rows(spreadsheet_id: str, sheet: str, filters: List[Dict[str, str]],
+               match_all: bool = True, range: Optional[str] = None,
+               include_header: bool = True, ctx: Context = None) -> Dict[str, Any]:
+    """
+    Query rows with multiple filter conditions.
+
+    filters: List of filter conditions, each with {column, operator, value}
+             Example: [{"column": "A", "operator": "contains", "value": "DIM_"},
+                       {"column": "B", "operator": "gt", "value": "100"}]
+    match_all: If True, all conditions must match (AND). If False, any condition matches (OR).
+    range: Optional A1 range to query within
+    include_header: Include header row in results
+
+    Supported operators: equals, not_equals, contains, not_contains, starts_with, ends_with,
+                         gt, gte, lt, lte, empty, not_empty, regex
+
+    Returns: {filtered_rows: [[...]], total_rows: N, matched_rows: N}
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    full_range = f"{sheet}!{range}" if range else sheet
+
+    result = sheets_service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=full_range).execute()
+    rows = result.get('values', [])
+
+    if not rows:
+        return {'filtered_rows': [], 'total_rows': 0, 'matched_rows': 0}
+
+    header = rows[0] if rows else []
+
+    # Resolve column indices for all filters
+    resolved_filters = []
+    for f in filters:
+        col = f.get('column', '')
+        col_idx = -1
+
+        if len(col) <= 2 and col.isalpha():
+            col_idx = _col_to_index(col.upper())
+        else:
+            for i, h in enumerate(header):
+                if str(h).lower() == col.lower():
+                    col_idx = i
+                    break
+
+        if col_idx == -1:
+            return {'error': f'Column "{col}" not found', 'filtered_rows': [], 'total_rows': len(rows), 'matched_rows': 0}
+
+        resolved_filters.append({
+            'col_idx': col_idx,
+            'operator': f.get('operator', 'equals'),
+            'value': f.get('value', '')
+        })
+
+    def check_condition(row: List, flt: Dict) -> bool:
+        col_idx = flt['col_idx']
+        operator = flt['operator']
+        value = flt['value']
+
+        cell_val = row[col_idx] if col_idx < len(row) else ''
+        cell_str = str(cell_val).strip() if cell_val else ''
+        val = str(value).strip() if value else ''
+        cell_lower = cell_str.lower()
+        val_lower = val.lower()
+
+        if operator == 'equals':
+            return cell_lower == val_lower
+        elif operator == 'not_equals':
+            return cell_lower != val_lower
+        elif operator == 'contains':
+            return val_lower in cell_lower
+        elif operator == 'not_contains':
+            return val_lower not in cell_lower
+        elif operator == 'starts_with':
+            return cell_lower.startswith(val_lower)
+        elif operator == 'ends_with':
+            return cell_lower.endswith(val_lower)
+        elif operator == 'empty':
+            return cell_str == ''
+        elif operator == 'not_empty':
+            return cell_str != ''
+        elif operator == 'regex':
+            import re
+            return bool(re.search(val, cell_str, re.IGNORECASE))
+        elif operator in ('gt', 'gte', 'lt', 'lte'):
+            try:
+                cell_num = float(cell_str.replace(',', ''))
+                val_num = float(val.replace(',', ''))
+                if operator == 'gt':
+                    return cell_num > val_num
+                elif operator == 'gte':
+                    return cell_num >= val_num
+                elif operator == 'lt':
+                    return cell_num < val_num
+                elif operator == 'lte':
+                    return cell_num <= val_num
+            except (ValueError, TypeError):
+                return False
+        return False
+
+    def row_matches(row: List) -> bool:
+        if match_all:
+            return all(check_condition(row, f) for f in resolved_filters)
+        else:
+            return any(check_condition(row, f) for f in resolved_filters)
+
+    filtered = []
+    if include_header and rows:
+        filtered.append(rows[0])
+
+    data_rows = rows[1:] if rows else []
+    for row in data_rows:
+        if row_matches(row):
+            filtered.append(row)
+
+    matched_count = len(filtered) - (1 if include_header and filtered else 0)
+    return {
+        'filtered_rows': filtered,
+        'total_rows': len(rows),
+        'matched_rows': matched_count
+    }
+
+
+# =============================================================================
 # SHEET/SPREADSHEET MANAGEMENT (ORIGINAL, PRESERVED)
 # =============================================================================
 
