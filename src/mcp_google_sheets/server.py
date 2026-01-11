@@ -961,6 +961,216 @@ def add_columns(spreadsheet_id: str, sheet: str, count: int, start_column: Optio
     ).execute()
 
 
+@mcp.tool()
+def clear_range(spreadsheet_id: str, sheet: str, range: str,
+                clear_contents: bool = True, clear_formatting: bool = False,
+                ctx: Context = None) -> Dict[str, Any]:
+    """
+    Clear cell contents and/or formatting in a range.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID
+        sheet: Sheet name (e.g., "Sheet1")
+        range: Cell range in A1 notation (e.g., "A1:Z100")
+        clear_contents: Clear cell values (default: True)
+        clear_formatting: Also clear formatting (default: False)
+
+    Example:
+        clear_range(id, "Sheet1", "A1:Z100")  # Clear contents only
+        clear_range(id, "Sheet1", "A1:Z100", clear_formatting=True)  # Clear everything
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    full_range = f"{sheet}!{range}"
+    results = {}
+
+    if clear_contents:
+        # Clear values using values().clear()
+        result = sheets_service.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id,
+            range=full_range,
+            body={}
+        ).execute()
+        results['contents_cleared'] = result
+
+    if clear_formatting:
+        # Clear formatting using batchUpdate
+        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{
+                "repeatCell": {
+                    "range": _grid_range(sheet_id, range),
+                    "cell": {"userEnteredFormat": {}},
+                    "fields": "userEnteredFormat"
+                }
+            }]}
+        ).execute()
+        results['formatting_cleared'] = result
+
+    return results
+
+
+@mcp.tool()
+def find_and_replace(spreadsheet_id: str, sheet: str, find: str, replace: str,
+                     match_case: bool = False, match_entire_cell: bool = False,
+                     use_regex: bool = False, ctx: Context = None) -> Dict[str, Any]:
+    """
+    Find and replace text across a sheet.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID
+        sheet: Sheet name (e.g., "Sheet1") or "*" for all sheets
+        find: Text to find
+        replace: Text to replace with
+        match_case: Match case exactly (default: False)
+        match_entire_cell: Only match if entire cell equals find text (default: False)
+        use_regex: Treat find as regular expression (default: False)
+
+    Example:
+        find_and_replace(id, "Sheet1", "🆕 NEW", "")  # Remove emoji status
+        find_and_replace(id, "Sheet1", "TODO", "DONE", match_case=True)
+        find_and_replace(id, "*", "old_name", "new_name")  # All sheets
+
+    Returns: {occurrences_changed: N, sheets_changed: N}
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+
+    request = {
+        "findReplace": {
+            "find": find,
+            "replacement": replace,
+            "matchCase": match_case,
+            "matchEntireCell": match_entire_cell,
+            "searchByRegex": use_regex
+        }
+    }
+
+    # If specific sheet, limit scope
+    if sheet != "*":
+        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+        request["findReplace"]["sheetId"] = sheet_id
+    else:
+        request["findReplace"]["allSheets"] = True
+
+    result = sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [request]}
+    ).execute()
+
+    # Extract find/replace result
+    replies = result.get('replies', [])
+    if replies and 'findReplace' in replies[0]:
+        fr = replies[0]['findReplace']
+        return {
+            'occurrences_changed': fr.get('occurrencesChanged', 0),
+            'values_changed': fr.get('valuesChanged', 0),
+            'formulas_changed': fr.get('formulasChanged', 0),
+            'rows_changed': fr.get('rowsChanged', 0),
+            'sheets_changed': fr.get('sheetsChanged', 0)
+        }
+
+    return {'occurrences_changed': 0, 'result': result}
+
+
+@mcp.tool()
+def append_columns(spreadsheet_id: str, sheet: str, headers: List[str],
+                   data: Optional[List[List[Any]]] = None,
+                   start_row: int = 1, ctx: Context = None) -> Dict[str, Any]:
+    """
+    Append new columns to the right of existing data.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID
+        sheet: Sheet name (e.g., "Sheet1")
+        headers: List of column headers to add
+        data: Optional 2D array of data for the new columns (rows should match existing data)
+        start_row: Row where headers start (default: 1, meaning row 1)
+
+    Example:
+        # Add single column with header only
+        append_columns(id, "Sheet1", ["New Column"])
+
+        # Add multiple columns with data
+        append_columns(id, "Sheet1",
+            headers=["Status", "Notes"],
+            data=[["Active", "First note"], ["Inactive", "Second note"]]
+        )
+
+    Returns: {start_column: "F", columns_added: N, range_updated: "F1:G10"}
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+
+    # Get current data to find the last column
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{sheet}!{start_row}:{start_row}"
+    ).execute()
+
+    existing_row = result.get('values', [[]])[0]
+    start_col_idx = len(existing_row)
+
+    # Convert column index to letter
+    def idx_to_col(idx: int) -> str:
+        col = ''
+        while idx >= 0:
+            col = chr(65 + idx % 26) + col
+            idx = idx // 26 - 1
+        return col
+
+    start_col = idx_to_col(start_col_idx)
+
+    # Prepare data to write: headers + data rows
+    values_to_write = [headers]
+    if data:
+        values_to_write.extend(data)
+
+    # Calculate end column
+    end_col_idx = start_col_idx + len(headers) - 1
+    end_col = idx_to_col(end_col_idx)
+    end_row = start_row + len(values_to_write) - 1
+
+    write_range = f"{sheet}!{start_col}{start_row}:{end_col}{end_row}"
+
+    # Write the new columns
+    write_result = sheets_service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=write_range,
+        valueInputOption='USER_ENTERED',
+        body={'values': values_to_write}
+    ).execute()
+
+    return {
+        'start_column': start_col,
+        'end_column': end_col,
+        'columns_added': len(headers),
+        'rows_written': len(values_to_write),
+        'range_updated': write_range,
+        'result': write_result
+    }
+
+
+@mcp.tool()
+def delete_sheet(spreadsheet_id: str, sheet: str, ctx: Context = None) -> Dict[str, Any]:
+    """
+    Delete a sheet tab from a spreadsheet.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID
+        sheet: Sheet name to delete
+
+    Returns: Confirmation of deletion
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+
+    result = sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [{"deleteSheet": {"sheetId": sheet_id}}]}
+    ).execute()
+
+    return {'deleted': sheet, 'sheet_id': sheet_id, 'result': result}
+
+
 # =============================================================================
 # QUERY/FILTER OPERATIONS
 # =============================================================================

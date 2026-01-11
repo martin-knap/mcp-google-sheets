@@ -172,6 +172,33 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
     *   `sheet` (string): Current sheet/tab name (e.g., "Sheet1").
     *   `new_name` (string): New sheet/tab name (e.g., "Transactions").
     *   _Returns:_ Result of the operation ([`batchUpdate` response](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/batchUpdate#response-body)).
+*   **`delete_sheet`**: Deletes a sheet/tab from a spreadsheet.
+    *   `spreadsheet_id` (string): The spreadsheet ID (from its URL).
+    *   `sheet` (string): Sheet/tab name to delete.
+    *   _Returns:_ Confirmation with deleted sheet name and ID.
+*   **`clear_range`**: Clears cell contents and/or formatting in a range. More efficient than overwriting with empty data.
+    *   `spreadsheet_id` (string): The spreadsheet ID (from its URL).
+    *   `sheet` (string): Name of the sheet/tab (e.g., "Sheet1").
+    *   `range` (string): A1 notation range to clear (e.g., "A1:Z100").
+    *   `clear_contents` (optional boolean, default `True`): Clear cell values.
+    *   `clear_formatting` (optional boolean, default `False`): Also clear cell formatting.
+    *   _Returns:_ Object with `contents_cleared` and/or `formatting_cleared` results.
+*   **`find_and_replace`**: Finds and replaces text across a sheet or all sheets.
+    *   `spreadsheet_id` (string): The spreadsheet ID (from its URL).
+    *   `sheet` (string): Sheet/tab name, or `"*"` for all sheets.
+    *   `find` (string): Text to find.
+    *   `replace` (string): Replacement text.
+    *   `match_case` (optional boolean, default `False`): Match case exactly.
+    *   `match_entire_cell` (optional boolean, default `False`): Only match if entire cell equals find text.
+    *   `use_regex` (optional boolean, default `False`): Treat find as regular expression.
+    *   _Returns:_ Object with `occurrences_changed`, `values_changed`, `rows_changed`, `sheets_changed`.
+*   **`append_columns`**: Appends new columns with headers (and optional data) to the right of existing data.
+    *   `spreadsheet_id` (string): The spreadsheet ID (from its URL).
+    *   `sheet` (string): Name of the sheet/tab (e.g., "Sheet1").
+    *   `headers` (array of strings): Column headers to add. Example: `["Status", "Notes"]`.
+    *   `data` (optional array of arrays): Data rows for the new columns. Example: `[["Active", "Note 1"], ["Inactive", "Note 2"]]`.
+    *   `start_row` (optional integer, default `1`): Row where headers start.
+    *   _Returns:_ Object with `start_column`, `end_column`, `columns_added`, `rows_written`, `range_updated`.
 
 **MCP Resources:**
 
