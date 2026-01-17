@@ -2248,6 +2248,13 @@ def sheets_visualize(
     width: int = 600,
     height: int = 400,
     style: Optional[str] = None,
+    # Chart styling options
+    chart_id: Optional[int] = None,
+    colors: Optional[List[str]] = None,
+    donut: bool = False,
+    smooth_lines: bool = False,
+    legend: Optional[str] = None,
+    show_gridlines: bool = True,
     # Pivot options
     source_range: Optional[str] = None,
     pivot_rows: Optional[List[str]] = None,
@@ -2264,19 +2271,39 @@ def sheets_visualize(
 
     Actions:
         chart: Create a chart
+        update_chart: Update an existing chart's style/colors
+        delete_chart: Delete a chart by ID
         pivot: Create a pivot table
         sparkline: Insert sparkline formula into a cell
 
-    Chart types: line, bar, column, pie, area, scatter, combo, stacked_bar, stacked_column
+    Chart types: line, bar, column, pie, area, scatter, combo, stacked_bar, stacked_column, donut
 
-    Chart styles: default, minimal, presentation
+    Chart styling options:
+        colors: List of colors for series (e.g., ["blue", "red", "green"] or ["#3366cc", "#dc3912"])
+        donut: Convert pie chart to donut (75% hole)
+        smooth_lines: Enable line smoothing for line charts
+        legend: Position - "bottom", "top", "right", "left", "none"
+        show_gridlines: Show/hide gridlines (default: True)
 
     Examples:
-        # Create a column chart
-        sheets_visualize(id, "Sheet1", "chart", chart_type="column", data_range="A1:E10", title="Sales by Region", position="G1")
+        # Create a column chart with custom colors
+        sheets_visualize(id, "Sheet1", "chart", chart_type="column", data_range="A1:E10",
+                        title="Sales", position="G1", colors=["blue", "red", "green"])
 
-        # Create a pie chart
-        sheets_visualize(id, "Sheet1", "chart", chart_type="pie", data_range="A1:B5", title="Market Share", position="D1", style="minimal")
+        # Create a donut chart
+        sheets_visualize(id, "Sheet1", "chart", chart_type="pie", data_range="A1:B5",
+                        title="Distribution", donut=True)
+
+        # Create a smooth line chart
+        sheets_visualize(id, "Sheet1", "chart", chart_type="line", data_range="A1:D10",
+                        smooth_lines=True, legend="bottom")
+
+        # Update existing chart colors
+        sheets_visualize(id, "Sheet1", "update_chart", chart_id=123456,
+                        colors=["#3366cc", "#dc3912", "#109618"])
+
+        # Delete a chart
+        sheets_visualize(id, "Sheet1", "delete_chart", chart_id=123456)
 
         # Create a pivot table
         sheets_visualize(id, "Sheet1", "pivot", source_range="A1:F100",
@@ -2342,43 +2369,71 @@ def sheets_visualize(
         # Bar charts use BOTTOM_AXIS, others use LEFT_AXIS
         target_axis = "BOTTOM_AXIS" if chart_type.lower() in ("bar", "stacked_bar") else "LEFT_AXIS"
 
+        # Parse colors if provided
+        parsed_colors = []
+        if colors:
+            for c in colors:
+                parsed = _parse_color(c)
+                if parsed:
+                    parsed_colors.append(parsed)
+
         series_list = []
-        for col_idx in range(start_col_idx + 1, end_col_idx + 1):
+        for i, col_idx in enumerate(range(start_col_idx + 1, end_col_idx + 1)):
             col_letter = _index_to_col(col_idx)
             series_range = f"{col_letter}{start_row}:{col_letter}{end_row}"
-            series_list.append({
+            series_item = {
                 "series": {"sourceRange": {"sources": [_grid_range(sheet_id, series_range)]}},
                 "targetAxis": target_axis
-            })
+            }
+            # Apply color if provided
+            if i < len(parsed_colors):
+                series_item["color"] = parsed_colors[i]
+            series_list.append(series_item)
+
+        # Legend position mapping
+        legend_map = {
+            "bottom": "BOTTOM_LEGEND", "top": "TOP_LEGEND",
+            "right": "RIGHT_LEGEND", "left": "LEFT_LEGEND",
+            "none": "NO_LEGEND"
+        }
+        legend_pos = legend_map.get(legend.lower() if legend else "bottom", "BOTTOM_LEGEND")
 
         # Basic chart spec
         chart_spec = {
             "title": title or "",
             "basicChart": {
                 "chartType": basic_chart_type,
-                "legendPosition": "BOTTOM_LEGEND",
+                "legendPosition": legend_pos,
                 "headerCount": 1,
                 "domains": [{"domain": {"sourceRange": {"sources": [_grid_range(sheet_id, domain_range)]}}}],
                 "series": series_list,
             }
         }
 
+        # Line smoothing
+        if smooth_lines and chart_type.lower() == "line":
+            chart_spec["basicChart"]["lineSmoothing"] = True
+
         # Stacked options
         if chart_type.lower() in ("stacked_bar", "stacked_column"):
             chart_spec["basicChart"]["stackedType"] = "STACKED"
 
-        # Pie chart uses different structure (only first series)
-        if chart_type.lower() == "pie":
+        # Pie/Donut chart uses different structure (only first series)
+        if chart_type.lower() in ("pie", "donut") or (chart_type.lower() == "pie" and donut):
             first_series_col = _index_to_col(start_col_idx + 1)
             first_series_range = f"{first_series_col}{start_row}:{first_series_col}{end_row}"
+            pie_legend = legend_map.get(legend.lower() if legend else "right", "RIGHT_LEGEND")
             chart_spec = {
                 "title": title or "",
                 "pieChart": {
-                    "legendPosition": "RIGHT_LEGEND",
+                    "legendPosition": pie_legend,
                     "domain": {"sourceRange": {"sources": [_grid_range(sheet_id, domain_range)]}},
                     "series": {"sourceRange": {"sources": [_grid_range(sheet_id, first_series_range)]}},
                 }
             }
+            # Donut: 75% hole
+            if donut or chart_type.lower() == "donut":
+                chart_spec["pieChart"]["pieHole"] = 0.75
 
         # Apply style preset
         if style and style.lower() in CHART_STYLES:
@@ -2408,8 +2463,81 @@ def sheets_visualize(
             spreadsheetId=spreadsheet_id, body={"requests": [request]}
         ).execute()
 
-        chart_id = result.get('replies', [{}])[0].get('addChart', {}).get('chart', {}).get('chartId')
-        return {'chart_created': True, 'chart_id': chart_id, 'type': chart_type, 'position': position}
+        new_chart_id = result.get('replies', [{}])[0].get('addChart', {}).get('chart', {}).get('chartId')
+        return {'chart_created': True, 'chart_id': new_chart_id, 'type': chart_type, 'position': position}
+
+    # === DELETE CHART ===
+    elif action == "delete_chart":
+        if not chart_id:
+            return {"error": "chart_id is required for delete_chart"}
+        request = {"deleteEmbeddedObject": {"objectId": chart_id}}
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [request]}
+        ).execute()
+        return {"deleted": True, "chart_id": chart_id}
+
+    # === UPDATE CHART (simplified - colors only for now) ===
+    elif action == "update_chart":
+        if not chart_id:
+            return {"error": "chart_id is required for update_chart"}
+
+        # Get current chart spec
+        spreadsheet = sheets_service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id, includeGridData=False
+        ).execute()
+
+        # Find the chart
+        current_spec = None
+        for s in spreadsheet.get('sheets', []):
+            for chart in s.get('charts', []):
+                if chart.get('chartId') == chart_id:
+                    current_spec = chart.get('spec', {})
+                    break
+
+        if not current_spec:
+            return {"error": f"Chart with ID {chart_id} not found"}
+
+        # Update colors in series
+        if colors:
+            parsed_colors = [_parse_color(c) for c in colors if _parse_color(c)]
+            if "basicChart" in current_spec:
+                for i, series in enumerate(current_spec["basicChart"].get("series", [])):
+                    if i < len(parsed_colors):
+                        series["color"] = parsed_colors[i]
+            elif "pieChart" in current_spec:
+                # Pie charts don't have series colors the same way
+                pass
+
+        # Update legend
+        if legend:
+            legend_map = {
+                "bottom": "BOTTOM_LEGEND", "top": "TOP_LEGEND",
+                "right": "RIGHT_LEGEND", "left": "LEFT_LEGEND",
+                "none": "NO_LEGEND"
+            }
+            legend_pos = legend_map.get(legend.lower(), "BOTTOM_LEGEND")
+            if "basicChart" in current_spec:
+                current_spec["basicChart"]["legendPosition"] = legend_pos
+            elif "pieChart" in current_spec:
+                current_spec["pieChart"]["legendPosition"] = legend_pos
+
+        # Update donut hole
+        if donut and "pieChart" in current_spec:
+            current_spec["pieChart"]["pieHole"] = 0.75
+
+        # Update line smoothing
+        if smooth_lines and "basicChart" in current_spec:
+            current_spec["basicChart"]["lineSmoothing"] = True
+
+        # Update title if provided
+        if title:
+            current_spec["title"] = title
+
+        request = {"updateChartSpec": {"chartId": chart_id, "spec": current_spec}}
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [request]}
+        ).execute()
+        return {"updated": True, "chart_id": chart_id}
 
     # === PIVOT ===
     elif action == "pivot":
