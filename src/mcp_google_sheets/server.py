@@ -226,6 +226,27 @@ ASCII = {
     "t_down": "┬", "t_up": "┴", "t_right": "├", "t_left": "┤", "cross": "┼",
 }
 
+# Chart rendering characters
+CHART_BLOCKS = "█▉▊▋▌▍▎▏"  # Full to 1/8 blocks (8 levels)
+SPARKLINE_CHARS = "▁▂▃▄▅▆▇█"  # Bottom to top (8 levels)
+
+# Shading palettes (light to dark)
+SHADING_PALETTES = {
+    "ascii": " .:-=+*#%@",      # Classic ASCII art
+    "blocks": " ░▒▓█",           # Smooth block gradients
+    "dots": " ·∘○●◉",            # Geometric dots
+    "density": " .,;!lI$@",      # High detail
+    "braille": "⠀⠁⠃⠇⠏⠟⠿⣿",       # Ultra-fine braille
+}
+
+# Box drawing character sets
+BOX_STYLES = {
+    "light": {"h": "─", "v": "│", "tl": "┌", "tr": "┐", "bl": "└", "br": "┘", "t_down": "┬", "t_up": "┴", "t_right": "├", "t_left": "┤", "cross": "┼"},
+    "heavy": {"h": "━", "v": "┃", "tl": "┏", "tr": "┓", "bl": "┗", "br": "┛", "t_down": "┳", "t_up": "┻", "t_right": "┣", "t_left": "┫", "cross": "╋"},
+    "double": {"h": "═", "v": "║", "tl": "╔", "tr": "╗", "bl": "╚", "br": "╝", "t_down": "╦", "t_up": "╩", "t_right": "╠", "t_left": "╣", "cross": "╬"},
+    "rounded": {"h": "─", "v": "│", "tl": "╭", "tr": "╮", "bl": "╰", "br": "╯", "t_down": "┬", "t_up": "┴", "t_right": "├", "t_left": "┤", "cross": "┼"},
+}
+
 
 def _ascii_center(text: str, width: int) -> str:
     """Center text within given width."""
@@ -294,6 +315,313 @@ def _ascii_arrow(direction: str = "right", length: int = 8) -> str:
     return ASCII["h"] * length
 
 
+def _ascii_bar(value: float, max_value: float, bar_width: int = 20) -> str:
+    """
+    Create a horizontal bar using block characters.
+
+    Args:
+        value: The value to represent
+        max_value: Maximum value for scaling
+        bar_width: Total width of the bar in characters
+
+    Returns:
+        String of block characters representing the value
+    """
+    if max_value <= 0 or value <= 0:
+        return ""
+
+    # Calculate how many "eighths" to fill
+    ratio = min(value / max_value, 1.0)
+    total_eighths = int(ratio * bar_width * 8)
+
+    full_blocks = total_eighths // 8
+    remainder = total_eighths % 8
+
+    bar = CHART_BLOCKS[0] * full_blocks  # Full blocks (█)
+    if remainder > 0:
+        bar += CHART_BLOCKS[8 - remainder]  # Partial block
+
+    return bar
+
+
+def _ascii_bar_chart(
+    data: List[Tuple[str, float]],
+    bar_width: int = 20,
+    show_values: bool = True,
+    label_width: int = None
+) -> List[str]:
+    """
+    Create a horizontal bar chart.
+
+    Args:
+        data: List of (label, value) tuples
+        bar_width: Width of the bar area in characters
+        show_values: Whether to show numeric values after bars
+        label_width: Fixed label width (auto-calculated if None)
+
+    Returns:
+        List of strings representing the chart lines
+    """
+    if not data:
+        return []
+
+    max_value = max(v for _, v in data)
+    if label_width is None:
+        label_width = max(len(label) for label, _ in data)
+
+    result = []
+    for label, value in data:
+        bar = _ascii_bar(value, max_value, bar_width)
+        line = f"{label:<{label_width}} │{bar}"
+        if show_values:
+            line += f" {value:,.0f}" if isinstance(value, (int, float)) and value == int(value) else f" {value:,.2f}"
+        result.append(line)
+
+    return result
+
+
+def _ascii_sparkline(values: List[float]) -> str:
+    """
+    Create a sparkline from a list of values.
+
+    Args:
+        values: List of numeric values
+
+    Returns:
+        String of sparkline characters
+    """
+    if not values:
+        return ""
+
+    min_val = min(values)
+    max_val = max(values)
+
+    if max_val == min_val:
+        return SPARKLINE_CHARS[4] * len(values)  # Middle char if all same
+
+    result = []
+    for v in values:
+        # Scale to 0-7 range
+        idx = int((v - min_val) / (max_val - min_val) * 7)
+        idx = max(0, min(7, idx))
+        result.append(SPARKLINE_CHARS[idx])
+
+    return "".join(result)
+
+
+def _ascii_progress_bar(value: float, max_value: float = 100, width: int = 20, show_percent: bool = True) -> str:
+    """
+    Create a progress bar.
+
+    Args:
+        value: Current value
+        max_value: Maximum value (default 100 for percentage)
+        width: Width of the bar
+        show_percent: Whether to show percentage label
+
+    Returns:
+        Progress bar string like [████████░░░░░░░░] 50%
+    """
+    ratio = min(value / max_value, 1.0) if max_value > 0 else 0
+    filled = int(ratio * width)
+    empty = width - filled
+
+    bar = f"[{CHART_BLOCKS[0] * filled}{'░' * empty}]"
+    if show_percent:
+        bar += f" {ratio * 100:.0f}%"
+
+    return bar
+
+
+def _ascii_shade_value(x: int, y: int, width: int, height: int, direction: str = "radial") -> float:
+    """
+    Calculate shading value (0.0-1.0) based on position and direction.
+
+    Args:
+        x, y: Current position
+        width, height: Total dimensions
+        direction: horizontal, vertical, radial, diagonal
+
+    Returns:
+        Float 0.0 (light) to 1.0 (dark)
+    """
+    import math
+
+    if width <= 0 or height <= 0:
+        return 0.5
+
+    center_x = width / 2
+    center_y = height / 2
+
+    if direction == "horizontal":
+        return x / width
+    elif direction == "vertical":
+        return y / height
+    elif direction == "radial":
+        dx = (x - center_x) / center_x if center_x > 0 else 0
+        dy = (y - center_y) / center_y if center_y > 0 else 0
+        dist = math.sqrt(dx * dx + dy * dy)
+        return min(dist, 1.0)
+    elif direction == "diagonal":
+        return (x + y) / (width + height)
+    elif direction == "diagonal_reverse":
+        return (width - x + y) / (width + height)
+    else:
+        return 0.5
+
+
+def _ascii_apply_contrast(value: float, contrast: float = 0.7) -> float:
+    """
+    Apply contrast adjustment to shade value.
+
+    Args:
+        value: Input value 0.0-1.0
+        contrast: 0.0 (flat) to 1.0 (high contrast)
+
+    Returns:
+        Adjusted value 0.0-1.0
+    """
+    if contrast < 0.5:
+        # Reduce contrast - compress to middle
+        range_compress = contrast * 2
+        result = 0.5 + (value - 0.5) * range_compress
+    else:
+        # Increase contrast - expand from middle
+        range_expand = (contrast - 0.5) * 2 + 1
+        if value < 0.5:
+            result = 0.5 - (0.5 - value) * range_expand
+        else:
+            result = 0.5 + (value - 0.5) * range_expand
+
+    return max(0.0, min(1.0, result))
+
+
+def _ascii_shaded_box(
+    width: int = 40,
+    height: int = 10,
+    title: str = None,
+    palette: str = "blocks",
+    direction: str = "radial",
+    contrast: float = 0.7,
+    box_style: str = "light"
+) -> List[str]:
+    """
+    Create a shaded box with gradient fill.
+
+    Args:
+        width: Box width
+        height: Box height
+        title: Optional title in top border
+        palette: Shading palette (ascii, blocks, dots, density, braille)
+        direction: Gradient direction (horizontal, vertical, radial, diagonal)
+        contrast: Contrast level 0.0-1.0
+        box_style: Border style (light, heavy, double, rounded)
+
+    Returns:
+        List of strings representing the shaded box
+    """
+    chars = BOX_STYLES.get(box_style, BOX_STYLES["light"])
+    shade_chars = SHADING_PALETTES.get(palette, SHADING_PALETTES["blocks"])
+
+    lines = []
+    inner_width = width - 2
+    inner_height = height - 2
+
+    # Top border with optional title
+    if title:
+        title_display = f" {title} "
+        title_len = len(title_display)
+        left_pad = (inner_width - title_len) // 2
+        right_pad = inner_width - title_len - left_pad
+        top = chars["tl"] + chars["h"] * left_pad + title_display + chars["h"] * right_pad + chars["tr"]
+    else:
+        top = chars["tl"] + chars["h"] * inner_width + chars["tr"]
+    lines.append(top)
+
+    # Middle rows with shading
+    for y in range(inner_height):
+        row = chars["v"]
+        for x in range(inner_width):
+            shade = _ascii_shade_value(x, y, inner_width, inner_height, direction)
+            shade = _ascii_apply_contrast(shade, contrast)
+            char_idx = int(shade * (len(shade_chars) - 1))
+            char_idx = max(0, min(char_idx, len(shade_chars) - 1))
+            row += shade_chars[char_idx]
+        row += chars["v"]
+        lines.append(row)
+
+    # Bottom border
+    bottom = chars["bl"] + chars["h"] * inner_width + chars["br"]
+    lines.append(bottom)
+
+    return lines
+
+
+def _ascii_table(
+    headers: List[str],
+    rows: List[List[str]],
+    box_style: str = "light"
+) -> List[str]:
+    """
+    Create a bordered table.
+
+    Args:
+        headers: List of column headers
+        rows: List of rows (each row is list of cell values)
+        box_style: Border style (light, heavy, double, rounded)
+
+    Returns:
+        List of strings representing the table
+    """
+    chars = BOX_STYLES.get(box_style, BOX_STYLES["light"])
+
+    # Calculate column widths
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            if i < len(col_widths):
+                col_widths[i] = max(col_widths[i], len(str(cell)))
+
+    lines = []
+
+    # Top border
+    top = chars["tl"]
+    for i, w in enumerate(col_widths):
+        top += chars["h"] * (w + 2)
+        top += chars["t_down"] if i < len(col_widths) - 1 else chars["tr"]
+    lines.append(top)
+
+    # Header row
+    header_row = chars["v"]
+    for i, h in enumerate(headers):
+        header_row += f" {h.ljust(col_widths[i])} " + chars["v"]
+    lines.append(header_row)
+
+    # Header separator
+    sep = chars["t_right"]
+    for i, w in enumerate(col_widths):
+        sep += chars["h"] * (w + 2)
+        sep += chars["cross"] if i < len(col_widths) - 1 else chars["t_left"]
+    lines.append(sep)
+
+    # Data rows
+    for row in rows:
+        data_row = chars["v"]
+        for i, cell in enumerate(row):
+            if i < len(col_widths):
+                data_row += f" {str(cell).ljust(col_widths[i])} " + chars["v"]
+        lines.append(data_row)
+
+    # Bottom border
+    bottom = chars["bl"]
+    for i, w in enumerate(col_widths):
+        bottom += chars["h"] * (w + 2)
+        bottom += chars["t_up"] if i < len(col_widths) - 1 else chars["br"]
+    lines.append(bottom)
+
+    return lines
+
+
 def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
     """
     Build a complete diagram from elements.
@@ -306,6 +634,11 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
         {"type": "arrow", "direction": "down"}
         {"type": "text", "text": "Raw text", "comment": "Optional comment"}
         {"type": "spacer"}
+        {"type": "bar_chart", "data": [("Label", 100), ("Label2", 50)], "bar_width": 20}
+        {"type": "sparkline", "data": [1, 5, 3, 8, 4], "label": "Trend:"}
+        {"type": "progress", "value": 75, "max": 100, "width": 20}
+        {"type": "shaded_box", "width": 40, "height": 10, "palette": "blocks", "direction": "radial"}
+        {"type": "table", "headers": ["A", "B"], "rows": [["1", "2"]], "box_style": "light"}
 
     Returns:
         Multi-line string of the diagram
@@ -350,6 +683,56 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
                 result.append(indent + char)
             else:
                 result.append(indent + _ascii_arrow(direction, elem.get("length", 8)))
+
+        elif t == "bar_chart":
+            data = elem.get("data", [])
+            bar_width = elem.get("bar_width", 20)
+            show_values = elem.get("show_values", True)
+            label_width = elem.get("label_width")
+            chart_lines = _ascii_bar_chart(data, bar_width, show_values, label_width)
+            for line in chart_lines:
+                result.append(indent + line)
+
+        elif t == "sparkline":
+            data = elem.get("data", [])
+            label = elem.get("label", "")
+            spark = _ascii_sparkline(data)
+            line = indent + (f"{label} " if label else "") + spark
+            if comment_str:
+                line += comment_str
+            result.append(line)
+
+        elif t == "progress":
+            value = elem.get("value", 0)
+            max_val = elem.get("max", 100)
+            bar_width = elem.get("width", 20)
+            show_percent = elem.get("show_percent", True)
+            label = elem.get("label", "")
+            bar = _ascii_progress_bar(value, max_val, bar_width, show_percent)
+            line = indent + (f"{label} " if label else "") + bar
+            if comment_str:
+                line += comment_str
+            result.append(line)
+
+        elif t == "shaded_box":
+            box_width = elem.get("width", 40)
+            box_height = elem.get("height", 10)
+            title = elem.get("title")
+            palette = elem.get("palette", "blocks")
+            direction = elem.get("direction", "radial")
+            contrast = elem.get("contrast", 0.7)
+            box_style = elem.get("box_style", "light")
+            shaded_lines = _ascii_shaded_box(box_width, box_height, title, palette, direction, contrast, box_style)
+            for line in shaded_lines:
+                result.append(indent + line)
+
+        elif t == "table":
+            headers = elem.get("headers", [])
+            rows = elem.get("rows", [])
+            box_style = elem.get("box_style", "light")
+            table_lines = _ascii_table(headers, rows, box_style)
+            for line in table_lines:
+                result.append(indent + line)
 
     return "\n".join(result)
 
@@ -693,6 +1076,37 @@ def sheets_data(
 
         # Or with raw string (for simple/pre-built diagrams)
         sheets_data(id, "Sheet1", "diagram", "A1", data="┌───┐\\n│ X │\\n└───┘", style="clean")
+
+        # Create diagram with bar chart (uses █▉▊▋▌▍▎▏ block elements)
+        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", width=60, elements=[
+            {"type": "title", "text": "SALES REPORT"},
+            {"type": "spacer"},
+            {"type": "bar_chart", "data": [["Q1", 100], ["Q2", 150], ["Q3", 120]], "bar_width": 25},
+        ])
+
+        # Create diagram with sparkline (uses ▁▂▃▄▅▆▇█ characters)
+        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", elements=[
+            {"type": "text", "text": "Weekly trend:"},
+            {"type": "sparkline", "data": [10, 15, 12, 18, 14, 20, 16], "label": "Views"},
+        ])
+
+        # Create diagram with progress bar
+        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", elements=[
+            {"type": "progress", "value": 75, "max": 100, "width": 20, "label": "Complete:"},
+        ])
+
+        # Create diagram with shaded box (gradient fill)
+        # Palettes: ascii, blocks, dots, density, braille
+        # Directions: horizontal, vertical, radial, diagonal
+        # Box styles: light, heavy, double, rounded
+        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", elements=[
+            {"type": "shaded_box", "width": 50, "height": 10, "title": "Status", "palette": "blocks", "direction": "radial", "box_style": "double"},
+        ])
+
+        # Create diagram with bordered table
+        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", elements=[
+            {"type": "table", "headers": ["Task", "Status", "Progress"], "rows": [["Deploy", "✓", "100%"], ["Test", "⏳", "65%"]], "box_style": "heavy"},
+        ])
     """
     sheets_service = ctx.request_context.lifespan_context.sheets_service
     action = action.lower()
@@ -2342,7 +2756,15 @@ def ascii_diagram(
     text: Optional[str] = None,
     lines: Optional[List[str]] = None,
     width: int = 77,
+    height: int = 10,
     elements: Optional[List[Dict[str, Any]]] = None,
+    data: Optional[List[Any]] = None,
+    headers: Optional[List[str]] = None,
+    rows: Optional[List[List[str]]] = None,
+    palette: str = "blocks",
+    direction: str = "radial",
+    contrast: float = 0.7,
+    box_style: str = "light",
     ctx: Context = None
 ) -> Dict[str, Any]:
     """
@@ -2354,12 +2776,25 @@ def ascii_diagram(
         comment: Create a comment annotation (◄── text)
         arrow: Create an arrow (direction: right, left, down, up)
         diagram: Build full diagram from elements list
+        bar_chart: Create horizontal bar chart from data
+        sparkline: Create inline sparkline from numeric data
+        progress: Create progress bar
+        shaded_box: Create a box with gradient shading fill
+        table: Create a bordered data table
 
     Args:
-        text: Text content for box/title/comment
+        text: Text content for box/title/comment/shaded_box title
         lines: Multiple lines for box content
         width: Total width (default 77, good for sheets)
+        height: Height for shaded_box (default 10)
         elements: List of element dicts for "diagram" action
+        data: Data for charts (bar_chart: [("label", value)...], sparkline: [1,2,3...])
+        headers: Column headers for table action
+        rows: Data rows for table action
+        palette: Shading palette (ascii, blocks, dots, density, braille)
+        direction: Gradient direction (horizontal, vertical, radial, diagonal)
+        contrast: Contrast level 0.0-1.0 for shaded_box
+        box_style: Border style (light, heavy, double, rounded)
 
     Element types for "diagram" action:
         {"type": "title", "text": "TITLE TEXT"}
@@ -2368,26 +2803,40 @@ def ascii_diagram(
         {"type": "text", "text": "Raw line", "x": 10}
         {"type": "arrow", "direction": "down", "x": 20}
         {"type": "spacer"}
+        {"type": "bar_chart", "data": [("Sales", 100), ("Costs", 50)], "bar_width": 20}
+        {"type": "sparkline", "data": [1,5,3,8,4], "label": "Trend:"}
+        {"type": "progress", "value": 75, "max": 100, "width": 20}
+        {"type": "shaded_box", "width": 40, "height": 10, "palette": "blocks", "direction": "radial"}
+        {"type": "table", "headers": ["Col1", "Col2"], "rows": [["A", "B"]], "box_style": "light"}
+
+    Shading palettes:
+        ascii: " .:-=+*#%@" (classic ASCII art)
+        blocks: " ░▒▓█" (smooth gradients)
+        dots: " ·∘○●◉" (geometric)
+        density: " .,;!lI$@" (high detail)
+        braille: "⠀⠁⠃⠇⠏⠟⠿⣿" (ultra-fine)
+
+    Box styles:
+        light: ┌─┐│└┘ (minimal)
+        heavy: ┏━┓┃┗┛ (bold)
+        double: ╔═╗║╚╝ (formal)
+        rounded: ╭─╮│╰╯ (friendly)
 
     Examples:
-        # Create a title box
-        ascii_diagram("title", text="SYSTEM ARCHITECTURE", width=60)
-        # Returns: ["┌──────────...──────────┐", "│  SYSTEM ARCHITECTURE  │", "└──────...┘"]
+        # Create a shaded box with radial gradient
+        ascii_diagram("shaded_box", text="Status", width=50, height=12, palette="blocks", direction="radial")
 
-        # Create a content box
-        ascii_diagram("box", lines=["Client", "(Web)"], width=14)
+        # Create a shaded box with horizontal gradient using double border
+        ascii_diagram("shaded_box", width=40, height=8, palette="dots", direction="horizontal", box_style="double")
 
-        # Create a comment
-        ascii_diagram("comment", text="Data Layer")
-        # Returns: "  ◄── Data Layer"
+        # Create a data table
+        ascii_diagram("table", headers=["Task", "Status"], rows=[["Deploy", "✓"], ["Test", "⏳"]], box_style="heavy")
 
-        # Build full diagram
-        ascii_diagram("diagram", width=77, elements=[
-            {"type": "title", "text": "ARCHITECTURE"},
-            {"type": "spacer"},
-            {"type": "box", "text": "API Server", "x": 20, "comment": "Main service"},
-            {"type": "arrow", "direction": "down", "x": 30},
-            {"type": "box", "lines": ["Database", "(Postgres)"], "x": 20}
+        # Build diagram with shaded box
+        ascii_diagram("diagram", elements=[
+            {"type": "title", "text": "DASHBOARD"},
+            {"type": "shaded_box", "width": 50, "height": 8, "palette": "blocks", "direction": "radial", "title": "Metrics"},
+            {"type": "table", "headers": ["Name", "Value"], "rows": [["CPU", "45%"], ["RAM", "2.1GB"]]}
         ])
     """
     action = action.lower()
@@ -2416,9 +2865,49 @@ def ascii_diagram(
         diagram_text = _ascii_diagram(elements, width)
         return {"lines": diagram_text.split("\n"), "text": diagram_text}
 
+    elif action == "bar_chart":
+        if not data:
+            return {"error": "data is required for bar_chart action (list of (label, value) tuples)"}
+        # Convert list of lists to list of tuples if needed
+        chart_data = [(d[0], d[1]) for d in data] if data else []
+        chart_lines = _ascii_bar_chart(chart_data, bar_width=width)
+        return {"lines": chart_lines, "text": "\n".join(chart_lines)}
+
+    elif action == "sparkline":
+        if not data:
+            return {"error": "data is required for sparkline action (list of numbers)"}
+        spark = _ascii_sparkline(data)
+        label = text or ""
+        result = f"{label} {spark}" if label else spark
+        return {"text": result}
+
+    elif action == "progress":
+        if not data or len(data) < 1:
+            return {"error": "data is required for progress action [value] or [value, max]"}
+        value = data[0]
+        max_val = data[1] if len(data) > 1 else 100
+        bar = _ascii_progress_bar(value, max_val, width)
+        return {"text": bar}
+
+    elif action == "shaded_box":
+        shaded_lines = _ascii_shaded_box(width, height, text, palette, direction, contrast, box_style)
+        return {"lines": shaded_lines, "text": "\n".join(shaded_lines)}
+
+    elif action == "table":
+        if not headers:
+            return {"error": "headers is required for table action"}
+        table_lines = _ascii_table(headers, rows or [], box_style)
+        return {"lines": table_lines, "text": "\n".join(table_lines)}
+
     elif action == "chars":
         # Return available ASCII characters for reference
-        return {"chars": ASCII}
+        return {
+            "box_chars": ASCII,
+            "bar_blocks": CHART_BLOCKS,
+            "sparkline_chars": SPARKLINE_CHARS,
+            "shading_palettes": SHADING_PALETTES,
+            "box_styles": list(BOX_STYLES.keys()),
+        }
 
     return {"error": f"Unknown action: {action}"}
 
