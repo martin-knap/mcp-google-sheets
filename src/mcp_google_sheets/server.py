@@ -628,8 +628,8 @@ def sheets_data(
     range: Optional[str] = None,
     # Read options
     include_formulas: bool = False,
-    # Write options
-    data: Optional[List[List[Any]]] = None,
+    # Write options (also accepts string for diagram action)
+    data: Optional[Union[List[List[Any]], str]] = None,
     style: Optional[str] = None,
     column_types: Optional[Dict[str, str]] = None,
     # Search options
