@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 """
-Google Spreadsheet MCP Server
-A Model Context Protocol (MCP) server built with FastMCP for interacting with Google Sheets.
+Google Spreadsheet MCP Server - v2 (Consolidated)
 
-Overhauled for simplicity - supports A1 notation, named colors, and high-level formatting.
+A Model Context Protocol (MCP) server with 6 powerful tools + semantic presets.
+Reduced from 38 tools to 6, with added chart/pivot/conditional formatting support.
 """
 
 import base64
 import os
 import sys
 import re
-from typing import List, Dict, Any, Optional, Tuple
+import time
+from typing import List, Dict, Any, Optional, Tuple, Union
+from enum import Enum
 import json
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
@@ -36,8 +38,9 @@ SERVICE_ACCOUNT_PATH = os.environ.get('SERVICE_ACCOUNT_PATH', 'service_account.j
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', '')
 
 # =============================================================================
-# COLOR PALETTE - Named colors for easy use
+# SEMANTIC PRESETS LIBRARY
 # =============================================================================
+
 COLORS = {
     # Basic colors
     "black": {"red": 0, "green": 0, "blue": 0},
@@ -69,27 +72,299 @@ COLORS = {
     "light_purple": {"red": 0.90, "green": 0.84, "blue": 0.93},
     "light_cyan": {"red": 0.80, "green": 0.94, "blue": 0.96},
     "light_pink": {"red": 0.97, "green": 0.80, "blue": 0.86},
+
+    # Dark variants (for headers)
+    "dark_blue": {"red": 0.10, "green": 0.27, "blue": 0.53},
+    "dark_green": {"red": 0.15, "green": 0.40, "blue": 0.20},
+    "dark_red": {"red": 0.60, "green": 0.15, "blue": 0.15},
+
+    # Native table theme colors (Google Sheets defaults)
+    "table_gray": {"red": 0.384, "green": 0.431, "blue": 0.478},      # #626e7a
+    "table_green": {"red": 0.286, "green": 0.337, "blue": 0.298},    # #49564c (default)
+    "table_red": {"red": 0.608, "green": 0.212, "blue": 0.259},      # #9b3642
 }
+
+# Text/Cell Style Presets
+STYLES = {
+    # Headings
+    "h1": {"bold": True, "font_size": 14, "bg_color": "dark_blue", "font_color": "white", "h_align": "center"},
+    "h2": {"bold": True, "font_size": 12, "bg_color": "light_blue"},
+    "h3": {"bold": True, "font_size": 11},
+    "title": {"bold": True, "font_size": 18, "h_align": "center"},
+    "subtitle": {"italic": True, "font_size": 14, "font_color": "gray"},
+
+    # Status indicators
+    "success": {"font_color": "green", "bold": True},
+    "error": {"font_color": "red", "bold": True},
+    "warning": {"font_color": "orange", "bold": True},
+    "info": {"font_color": "blue"},
+    "muted": {"font_color": "gray"},
+    "highlight": {"bg_color": "light_yellow"},
+
+    # Quick formatting
+    "bold": {"bold": True},
+    "italic": {"italic": True},
+    "underline": {"underline": True},
+    "strikethrough": {"strikethrough": True},
+    "center": {"h_align": "center"},
+    "right": {"h_align": "right"},
+    "left": {"h_align": "left"},
+    "wrap": {"wrap": "wrap"},
+    "code": {"font_color": "dark_gray", "bg_color": "light_gray"},
+
+    # Data-specific
+    "header": {"bold": True, "bg_color": "light_blue", "h_align": "center"},
+    "total": {"bold": True, "bg_color": "light_gray"},
+    "negative": {"font_color": "red"},
+    "positive": {"font_color": "green"},
+
+    # ASCII art / diagrams (monospace)
+    "mono": {"font_family": "Courier New", "font_size": 10},
+    "ascii": {"font_family": "Courier New", "font_size": 10, "bg_color": "white"},
+    "diagram": {"font_family": "Courier New", "font_size": 11, "bg_color": "white"},
+}
+
+# Native Google Sheets Table Presets (using addTable API)
+# Native tables use Google's default styling with auto-expand and filters
+TABLE_STYLES = {
+    # Default - native Google Sheets table with default green theme
+    "table": {"native": True},  # Uses Google's default green theme
+
+    # Native tables with custom color themes
+    "table_green": {
+        "native": True,
+        "header_color": "table_green",      # #49564c
+        "band_color": {"red": 0.965, "green": 0.973, "blue": 0.976},  # Light green-gray
+    },
+    "table_gray": {
+        "native": True,
+        "header_color": "table_gray",       # #626e7a
+        "band_color": {"red": 0.953, "green": 0.957, "blue": 0.965},  # Light gray
+    },
+    "table_red": {
+        "native": True,
+        "header_color": "table_red",        # #9b3642
+        "band_color": {"red": 0.976, "green": 0.957, "blue": 0.961},  # Light red
+    },
+
+    # Legacy manual styling (no auto-expand, no filters, custom colors)
+    "basic": {
+        "header": {"bold": True, "bg_color": "light_blue", "h_align": "center"},
+        "header_border": {"style": "solid", "sides": "bottom"},
+        "body_border": {"style": "solid", "sides": "outer"},
+        "auto_resize": True,
+        "native": False,
+    },
+    "basic_striped": {
+        "header": {"bold": True, "bg_color": "dark_blue", "font_color": "white", "h_align": "center"},
+        "header_border": {"style": "solid", "sides": "bottom", "color": "dark_blue"},
+        "odd_rows": {"bg_color": "light_gray"},
+        "body_border": {"style": "solid", "sides": "all"},
+        "auto_resize": True,
+        "native": False,
+    },
+    "basic_bordered": {
+        "header": {"bold": True, "bg_color": "light_gray", "h_align": "center"},
+        "body_border": {"style": "solid", "sides": "all"},
+        "auto_resize": True,
+        "native": False,
+    },
+}
+
+# Number Format Presets
+NUMBER_FORMATS = {
+    "currency": "$#,##0.00",
+    "currency_whole": "$#,##0",
+    "currency_neg_red": "$#,##0.00;[Red]($#,##0.00)",
+    "accounting": '_($* #,##0.00_)',
+    "euro": "€#,##0.00",
+    "pound": "£#,##0.00",
+    "percent": "0.00%",
+    "percent_whole": "0%",
+    "number": "#,##0",
+    "decimal": "#,##0.00",
+    "decimal_4": "#,##0.0000",
+    "integer": "0",
+    "date": "yyyy-mm-dd",
+    "date_short": "mm/dd/yy",
+    "date_long": "mmmm d, yyyy",
+    "date_eu": "dd/mm/yyyy",
+    "datetime": "yyyy-mm-dd hh:mm:ss",
+    "time": "hh:mm:ss",
+    "time_short": "hh:mm",
+    "phone": "(###) ###-####",
+    "zip": "00000",
+    "scientific": "0.00E+00",
+}
+
+# Chart Style Presets
+CHART_STYLES = {
+    "default": {
+        "legend_position": "BOTTOM_LEGEND",
+        "title_text_position": {"horizontalAlignment": "CENTER"},
+    },
+    "minimal": {
+        "legend_position": "NO_LEGEND",
+        "background_color": {"red": 1, "green": 1, "blue": 1, "alpha": 0},
+    },
+    "presentation": {
+        "legend_position": "RIGHT_LEGEND",
+        "title_text_format": {"bold": True, "fontSize": 14},
+    },
+}
+
+# =============================================================================
+# ASCII DIAGRAM BUILDER UTILITIES
+# =============================================================================
+
+# Box-drawing characters
+ASCII = {
+    "tl": "┌", "tr": "┐", "bl": "└", "br": "┘",  # corners
+    "h": "─", "v": "│",                            # lines
+    "arrow_r": "►", "arrow_l": "◄", "arrow_d": "▼", "arrow_u": "▲",
+    "line_r": "─►", "line_l": "◄─", "line_d": "─▼", "line_u": "▲─",
+    "t_down": "┬", "t_up": "┴", "t_right": "├", "t_left": "┤", "cross": "┼",
+}
+
+
+def _ascii_center(text: str, width: int) -> str:
+    """Center text within given width."""
+    if len(text) >= width:
+        return text[:width]
+    padding = width - len(text)
+    left = padding // 2
+    right = padding - left
+    return " " * left + text + " " * right
+
+
+def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int = 1) -> List[str]:
+    """
+    Create a box around content.
+
+    Args:
+        content: Single string or list of strings (lines)
+        width: Total box width (auto-calculated if None)
+        padding: Internal padding on each side
+
+    Returns:
+        List of strings representing the box
+    """
+    lines = [content] if isinstance(content, str) else content
+    inner_width = max(len(line) for line in lines) if not width else width - 2 - (padding * 2)
+    total_width = inner_width + 2 + (padding * 2)
+
+    result = []
+    # Top border
+    result.append(ASCII["tl"] + ASCII["h"] * (total_width - 2) + ASCII["tr"])
+    # Content lines
+    pad = " " * padding
+    for line in lines:
+        centered = _ascii_center(line, inner_width)
+        result.append(ASCII["v"] + pad + centered + pad + ASCII["v"])
+    # Bottom border
+    result.append(ASCII["bl"] + ASCII["h"] * (total_width - 2) + ASCII["br"])
+    return result
+
+
+def _ascii_title_box(title: str, width: int = 77) -> List[str]:
+    """Create a title box (header bar) with centered title."""
+    inner = width - 2
+    return [
+        ASCII["tl"] + ASCII["h"] * inner + ASCII["tr"],
+        ASCII["v"] + _ascii_center(title, inner) + ASCII["v"],
+        ASCII["bl"] + ASCII["h"] * inner + ASCII["br"],
+    ]
+
+
+def _ascii_comment(text: str) -> str:
+    """Create a comment annotation like: ◄── Comment text"""
+    return f"  {ASCII['arrow_l']}{ASCII['h']}{ASCII['h']} {text}"
+
+
+def _ascii_arrow(direction: str = "right", length: int = 8) -> str:
+    """Create an arrow line. Direction: right, left, down, up."""
+    if direction == "right":
+        return ASCII["h"] * (length - 1) + ASCII["arrow_r"]
+    elif direction == "left":
+        return ASCII["arrow_l"] + ASCII["h"] * (length - 1)
+    elif direction == "down":
+        return ASCII["v"]  # Vertical arrows are single char per line
+    elif direction == "up":
+        return ASCII["v"]
+    return ASCII["h"] * length
+
+
+def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
+    """
+    Build a complete diagram from elements.
+
+    Elements can be:
+        {"type": "title", "text": "TITLE"}
+        {"type": "box", "text": "Content", "x": 4}  # x = indent
+        {"type": "box", "lines": ["Line1", "Line2"], "x": 4}
+        {"type": "line", "text": "───────►"}
+        {"type": "arrow", "direction": "down"}
+        {"type": "text", "text": "Raw text", "comment": "Optional comment"}
+        {"type": "spacer"}
+
+    Returns:
+        Multi-line string of the diagram
+    """
+    result = []
+
+    for elem in elements:
+        t = elem.get("type", "text")
+        x = elem.get("x", 0)  # indent
+        indent = " " * x
+        comment = elem.get("comment", "")
+        comment_str = _ascii_comment(comment) if comment else ""
+
+        if t == "title":
+            for line in _ascii_title_box(elem["text"], width):
+                result.append(line)
+
+        elif t == "box":
+            box_width = elem.get("width")
+            lines = elem.get("lines", [elem.get("text", "")])
+            box_lines = _ascii_box(lines, box_width)
+            middle_idx = len(box_lines) // 2  # Middle line (where content is)
+            for i, line in enumerate(box_lines):
+                full_line = indent + line
+                if comment_str and i == middle_idx:
+                    full_line += comment_str
+                result.append(full_line)
+
+        elif t == "spacer":
+            result.append("")
+
+        elif t == "text":
+            line = indent + elem.get("text", "")
+            if comment_str:
+                line += comment_str
+            result.append(line)
+
+        elif t == "arrow":
+            direction = elem.get("direction", "down")
+            if direction in ("down", "up"):
+                char = ASCII["arrow_d"] if direction == "down" else ASCII["arrow_u"]
+                result.append(indent + char)
+            else:
+                result.append(indent + _ascii_arrow(direction, elem.get("length", 8)))
+
+    return "\n".join(result)
+
 
 # =============================================================================
 # INTERNAL UTILITIES
 # =============================================================================
 
 def _parse_color(color: str) -> Optional[Dict[str, float]]:
-    """
-    Parse a color string into RGB dict (0-1 scale).
-    Supports: named colors ("blue"), hex ("#4285F4", "F00"), rgb("rgb(66,133,244)")
-    """
+    """Parse a color string into RGB dict (0-1 scale)."""
     if not color:
         return None
-
     color = color.strip().lower()
-
-    # Named colors
     if color in COLORS:
         return COLORS[color]
-
-    # Hex colors
     hex_match = re.match(r'^#?([0-9a-f]{6}|[0-9a-f]{3})$', color)
     if hex_match:
         hex_str = hex_match.group(1)
@@ -100,8 +375,6 @@ def _parse_color(color: str) -> Optional[Dict[str, float]]:
             "green": int(hex_str[2:4], 16) / 255,
             "blue": int(hex_str[4:6], 16) / 255
         }
-
-    # RGB format
     rgb_match = re.match(r'rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', color)
     if rgb_match:
         return {
@@ -109,8 +382,7 @@ def _parse_color(color: str) -> Optional[Dict[str, float]]:
             "green": int(rgb_match.group(2)) / 255,
             "blue": int(rgb_match.group(3)) / 255
         }
-
-    raise ValueError(f"Unknown color: {color}. Use named (blue, light_green), hex (#4285F4), or rgb(66,133,244)")
+    raise ValueError(f"Unknown color: {color}")
 
 
 def _col_to_index(col: str) -> int:
@@ -121,33 +393,34 @@ def _col_to_index(col: str) -> int:
     return result - 1
 
 
+def _index_to_col(idx: int) -> str:
+    """Convert 0-based index to column letter(s)."""
+    col = ''
+    idx += 1
+    while idx > 0:
+        idx, remainder = divmod(idx - 1, 26)
+        col = chr(65 + remainder) + col
+    return col
+
+
 def _parse_a1(a1_range: str) -> Tuple[int, Optional[int], int, Optional[int]]:
-    """
-    Parse A1 notation to 0-based indexes: (start_row, end_row, start_col, end_col)
-    Examples: "A1" -> (0,1,0,1), "A1:B5" -> (0,5,0,2), "B:D" -> (0,None,1,4)
-    """
+    """Parse A1 notation to 0-based indexes."""
     if '!' in a1_range:
         a1_range = a1_range.split('!')[1]
-
     if ':' in a1_range:
         start, end = a1_range.split(':')
     else:
         start = end = a1_range
-
     start_match = re.match(r'^([A-Za-z]*)(\d*)$', start)
     end_match = re.match(r'^([A-Za-z]*)(\d*)$', end)
-
     if not start_match or not end_match:
         raise ValueError(f"Invalid A1 notation: {a1_range}")
-
     start_col_str, start_row_str = start_match.groups()
     end_col_str, end_row_str = end_match.groups()
-
     start_row = int(start_row_str) - 1 if start_row_str else 0
     end_row = int(end_row_str) if end_row_str else None
     start_col = _col_to_index(start_col_str) if start_col_str else 0
     end_col = _col_to_index(end_col_str) + 1 if end_col_str else None
-
     return (start_row, end_row, start_col, end_col)
 
 
@@ -175,6 +448,96 @@ def _grid_range(sheet_id: int, a1_range: str) -> Dict[str, Any]:
     return gr
 
 
+def _resolve_number_format(fmt: str) -> str:
+    """Resolve a number format preset or return as-is."""
+    return NUMBER_FORMATS.get(fmt.lower(), fmt) if fmt else fmt
+
+
+def _resolve_style(style_name: str) -> Dict[str, Any]:
+    """Resolve a style preset name to its properties."""
+    return STYLES.get(style_name.lower(), {}) if style_name else {}
+
+
+def _build_cell_format(
+    bold: bool = None,
+    italic: bool = None,
+    underline: bool = None,
+    strikethrough: bool = None,
+    font_size: int = None,
+    font_color: str = None,
+    font_family: str = None,
+    bg_color: str = None,
+    h_align: str = None,
+    v_align: str = None,
+    wrap: str = None,
+    number_format: str = None,
+) -> Tuple[Dict[str, Any], List[str]]:
+    """Build cell format dict and fields list from parameters."""
+    cell_format = {}
+    text_format = {}
+    fields = []
+
+    if bold is not None:
+        text_format["bold"] = bold
+    if italic is not None:
+        text_format["italic"] = italic
+    if underline is not None:
+        text_format["underline"] = underline
+    if strikethrough is not None:
+        text_format["strikethrough"] = strikethrough
+    if font_size is not None:
+        text_format["fontSize"] = font_size
+    if font_color:
+        text_format["foregroundColor"] = _parse_color(font_color)
+    if font_family:
+        text_format["fontFamily"] = font_family
+
+    if text_format:
+        cell_format["textFormat"] = text_format
+        fields.append("userEnteredFormat.textFormat")
+
+    if bg_color:
+        cell_format["backgroundColor"] = _parse_color(bg_color)
+        fields.append("userEnteredFormat.backgroundColor")
+
+    if h_align:
+        cell_format["horizontalAlignment"] = {"left": "LEFT", "center": "CENTER", "right": "RIGHT"}.get(h_align.lower(), h_align.upper())
+        fields.append("userEnteredFormat.horizontalAlignment")
+    if v_align:
+        cell_format["verticalAlignment"] = {"top": "TOP", "middle": "MIDDLE", "bottom": "BOTTOM"}.get(v_align.lower(), v_align.upper())
+        fields.append("userEnteredFormat.verticalAlignment")
+    if wrap:
+        wrap_val = wrap if isinstance(wrap, str) else ("wrap" if wrap else "overflow")
+        cell_format["wrapStrategy"] = {"overflow": "OVERFLOW_CELL", "clip": "CLIP", "wrap": "WRAP"}.get(wrap_val.lower(), wrap_val.upper())
+        fields.append("userEnteredFormat.wrapStrategy")
+    if number_format:
+        resolved = _resolve_number_format(number_format)
+        cell_format["numberFormat"] = {"type": "NUMBER", "pattern": resolved}
+        fields.append("userEnteredFormat.numberFormat")
+
+    return cell_format, fields
+
+
+def _build_border(style: str = "solid", color: str = "black") -> Dict[str, Any]:
+    """Build a border specification."""
+    border_style = {"solid": "SOLID", "dashed": "DASHED", "dotted": "DOTTED", "double": "DOUBLE", "none": "NONE"}.get(style.lower(), "SOLID")
+    return {"style": border_style, "color": _parse_color(color)}
+
+
+def _parse_column_range(col_spec: str) -> List[int]:
+    """Parse column specification like 'B', 'B:D', 'B,D,F' to list of indices."""
+    indices = []
+    for part in col_spec.replace(' ', '').split(','):
+        if ':' in part:
+            start, end = part.split(':')
+            start_idx = _col_to_index(start)
+            end_idx = _col_to_index(end)
+            indices.extend(range(start_idx, end_idx + 1))
+        else:
+            indices.append(_col_to_index(part))
+    return indices
+
+
 # =============================================================================
 # LIFESPAN & SERVER SETUP
 # =============================================================================
@@ -198,9 +561,8 @@ async def spreadsheet_lifespan(server: FastMCP) -> AsyncIterator[SpreadsheetCont
     if not creds and SERVICE_ACCOUNT_PATH and os.path.exists(SERVICE_ACCOUNT_PATH):
         try:
             creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_PATH, scopes=SCOPES)
-            print("Using service account authentication")
-        except Exception as e:
-            print(f"Service account auth failed: {e}")
+        except Exception:
+            pass
 
     if not creds:
         if os.path.exists(TOKEN_PATH):
@@ -255,1297 +617,1820 @@ mcp = FastMCP("Google Spreadsheet",
 
 
 # =============================================================================
-# HIGH-LEVEL FORMATTING TOOLS
+# TOOL 1: sheets_data - Read/Write/Search/Replace/Sort
 # =============================================================================
 
 @mcp.tool()
-def format_cells(spreadsheet_id: str,
-                 sheet: str,
-                 range: str,
-                 bold: Optional[bool] = None,
-                 italic: Optional[bool] = None,
-                 underline: Optional[bool] = None,
-                 strikethrough: Optional[bool] = None,
-                 font_size: Optional[int] = None,
-                 font_color: Optional[str] = None,
-                 bg_color: Optional[str] = None,
-                 h_align: Optional[str] = None,
-                 v_align: Optional[str] = None,
-                 wrap: Optional[str] = None,
-                 number_format: Optional[str] = None,
-                 ctx: Context = None) -> Dict[str, Any]:
+def sheets_data(
+    spreadsheet_id: str,
+    sheet: str,
+    action: str,
+    range: Optional[str] = None,
+    # Read options
+    include_formulas: bool = False,
+    # Write options
+    data: Optional[List[List[Any]]] = None,
+    style: Optional[str] = None,
+    column_types: Optional[Dict[str, str]] = None,
+    # Search options
+    filters: Optional[List[Dict[str, str]]] = None,
+    match_all: bool = True,
+    include_header: bool = True,
+    # Replace options
+    find: Optional[str] = None,
+    replace_with: Optional[str] = None,
+    use_regex: bool = False,
+    match_case: bool = False,
+    # Sort options
+    sort_by: Optional[List[Dict[str, str]]] = None,
+    ctx: Context = None
+) -> Dict[str, Any]:
     """
-    Format cells using A1 notation and named colors.
+    Unified data operations for Google Sheets.
 
-    Args:
-        spreadsheet_id: The spreadsheet ID
-        sheet: Sheet name (e.g., "Sheet1")
-        range: Cell range in A1 notation (e.g., "A1:B5", "C3")
-        bold: Make text bold
-        italic: Make text italic
-        underline: Underline text
-        strikethrough: Strikethrough text
-        font_size: Font size in points
-        font_color: Text color - "blue", "red", "#4285F4"
-        bg_color: Background color - "light_yellow", "#FFEB3B"
-        h_align: Horizontal align - "left", "center", "right"
-        v_align: Vertical align - "top", "middle", "bottom"
-        wrap: Text wrap - "overflow", "clip", "wrap"
-        number_format: Number format pattern (e.g., "#,##0.00", "0%")
+    Actions:
+        read: Get cell values (add include_formulas=True for formulas)
+        write: Write data with optional table styling and column type formatting
+        clear: Clear cell contents (and optionally formatting)
+        search: Filter/query rows with conditions
+        replace: Find and replace text across the sheet
+        sort: Sort a range by specified columns
+        diagram: Create ASCII art/text diagrams with monospace font (use style="clean" to hide gridlines)
 
-    Example:
-        format_cells(id, "Sheet1", "A1:B5", bold=True, font_color="blue", bg_color="light_yellow")
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    Table styles:
+        Native tables (auto-expand, filters): "table" (default green), "table_green", "table_gray", "table_red"
+        Styled ranges (no auto-expand): "basic", "basic_striped", "basic_bordered"
 
-    cell_format = {}
-    text_format = {}
+    Column types: {"B": "currency", "C:E": "percent", "F": "date"} - see NUMBER_FORMATS for options
 
-    if bold is not None:
-        text_format["bold"] = bold
-    if italic is not None:
-        text_format["italic"] = italic
-    if underline is not None:
-        text_format["underline"] = underline
-    if strikethrough is not None:
-        text_format["strikethrough"] = strikethrough
-    if font_size is not None:
-        text_format["fontSize"] = font_size
-    if font_color:
-        text_format["foregroundColor"] = _parse_color(font_color)
+    Examples:
+        # Read data
+        sheets_data(id, "Sheet1", "read", "A1:D10")
 
-    if text_format:
-        cell_format["textFormat"] = text_format
+        # Write with native table formatting (like Format > Convert to Table)
+        sheets_data(id, "Sheet1", "write", "A1", data=[["Name","Sales"],["John",1000]], style="table", column_types={"B": "currency"})
 
-    if bg_color:
-        cell_format["backgroundColor"] = _parse_color(bg_color)
+        # Write with basic styled range (no filters, no auto-expand)
+        sheets_data(id, "Sheet1", "write", "A1", data=[["Name","Sales"],["John",1000]], style="basic_striped")
 
-    if h_align:
-        cell_format["horizontalAlignment"] = {"left": "LEFT", "center": "CENTER", "right": "RIGHT"}.get(h_align.lower(), h_align.upper())
-    if v_align:
-        cell_format["verticalAlignment"] = {"top": "TOP", "middle": "MIDDLE", "bottom": "BOTTOM"}.get(v_align.lower(), v_align.upper())
-    if wrap:
-        cell_format["wrapStrategy"] = {"overflow": "OVERFLOW_CELL", "clip": "CLIP", "wrap": "WRAP"}.get(wrap.lower(), wrap.upper())
-    if number_format:
-        cell_format["numberFormat"] = {"type": "NUMBER", "pattern": number_format}
+        # Search/filter rows
+        sheets_data(id, "Sheet1", "search", filters=[{"column": "Status", "op": "equals", "value": "Active"}])
 
-    if not cell_format:
-        return {"error": "No formatting options specified"}
+        # Find and replace
+        sheets_data(id, "Sheet1", "replace", find="old", replace_with="new")
 
-    fields = []
-    if text_format:
-        fields.append("userEnteredFormat.textFormat")
-    if bg_color:
-        fields.append("userEnteredFormat.backgroundColor")
-    if h_align:
-        fields.append("userEnteredFormat.horizontalAlignment")
-    if v_align:
-        fields.append("userEnteredFormat.verticalAlignment")
-    if wrap:
-        fields.append("userEnteredFormat.wrapStrategy")
-    if number_format:
-        fields.append("userEnteredFormat.numberFormat")
+        # Sort by column
+        sheets_data(id, "Sheet1", "sort", "A1:D100", sort_by=[{"column": "B", "order": "desc"}])
 
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{
-            "repeatCell": {
-                "range": _grid_range(sheet_id, range),
-                "cell": {"userEnteredFormat": cell_format},
-                "fields": ",".join(fields)
-            }
-        }]}
-    ).execute()
+        # Create ASCII diagram (monospace, white background)
+        sheets_data(id, "Sheet1", "diagram", "A1", data="┌────────┐\\n│ Hello  │\\n└────────┘")
 
-
-@mcp.tool()
-def set_borders(spreadsheet_id: str,
-                sheet: str,
-                range: str,
-                style: str = "solid",
-                color: str = "black",
-                borders: str = "all",
-                ctx: Context = None) -> Dict[str, Any]:
-    """
-    Set borders on cells.
-
-    Args:
-        spreadsheet_id: The spreadsheet ID
-        sheet: Sheet name
-        range: Cell range in A1 notation
-        style: "solid", "dashed", "dotted", "double", "none"
-        color: Border color (named or hex)
-        borders: "all", "outer", "inner", or comma-separated: "top,bottom,left,right"
+        # Create diagram with hidden gridlines for cleaner look
+        sheets_data(id, "Sheet1", "diagram", "A1", data="flowchart...", style="clean")
     """
     sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    action = action.lower()
 
-    border_style = {"solid": "SOLID", "dashed": "DASHED", "dotted": "DOTTED", "double": "DOUBLE", "none": "NONE"}.get(style.lower(), "SOLID")
-    border = {"style": border_style, "color": _parse_color(color)}
+    # === READ ===
+    if action == "read":
+        full_range = f"{sheet}!{range}" if range else sheet
+        if include_formulas:
+            result = sheets_service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id, range=full_range, valueRenderOption='FORMULA'
+            ).execute()
+        else:
+            result = sheets_service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id, range=full_range
+            ).execute()
+        return {'range': full_range, 'values': result.get('values', [])}
 
-    req = {"range": _grid_range(sheet_id, range)}
-    b = borders.lower()
+    # === WRITE ===
+    elif action == "write":
+        if not data:
+            return {"error": "data is required for write action"}
+        if not range:
+            return {"error": "range is required for write action"}
 
-    if b == "all":
-        req.update({"top": border, "bottom": border, "left": border, "right": border, "innerHorizontal": border, "innerVertical": border})
-    elif b == "outer":
-        req.update({"top": border, "bottom": border, "left": border, "right": border})
-    elif b == "inner":
-        req.update({"innerHorizontal": border, "innerVertical": border})
-    else:
-        for side in b.split(","):
-            side = side.strip()
-            if side in ["top", "bottom", "left", "right"]:
-                req[side] = border
+        results = {}
+        full_range = f"{sheet}!{range}"
 
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"updateBorders": req}]}
-    ).execute()
+        # Write the data
+        write_result = sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=full_range,
+            valueInputOption='USER_ENTERED', body={'values': data}
+        ).execute()
+        results['write'] = write_result
 
+        # Apply table style and column types if specified
+        if style or column_types:
+            sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+            requests = []
 
-@mcp.tool()
-def merge_cells(spreadsheet_id: str, sheet: str, range: str, merge_type: str = "all", ctx: Context = None) -> Dict[str, Any]:
-    """
-    Merge cells. merge_type: "all" (single cell), "columns", "rows"
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
-    mt = {"all": "MERGE_ALL", "columns": "MERGE_COLUMNS", "rows": "MERGE_ROWS"}.get(merge_type.lower(), "MERGE_ALL")
+            # Parse range for data bounds
+            start_row, _, start_col, _ = _parse_a1(range)
+            num_rows = len(data)
+            num_cols = len(data[0]) if data else 0
+            end_row = start_row + num_rows
+            end_col = start_col + num_cols
 
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"mergeCells": {"range": _grid_range(sheet_id, range), "mergeType": mt}}]}
-    ).execute()
+            # Apply table style
+            if style and style.lower() in TABLE_STYLES:
+                ts = TABLE_STYLES[style.lower()]
+                grid = {"sheetId": sheet_id, "startRowIndex": start_row, "endRowIndex": end_row,
+                        "startColumnIndex": start_col, "endColumnIndex": end_col}
 
+                # Check if this is a native table style (uses addTable API)
+                if ts.get('native', False):
+                    # Build column properties from header row (first row of data)
+                    header_row = data[0] if data else []
+                    column_properties = []
+                    for i, col_name in enumerate(header_row):
+                        column_properties.append({
+                            "columnIndex": i,
+                            "columnName": str(col_name) if col_name else f"Column{i+1}"
+                        })
 
-@mcp.tool()
-def unmerge_cells(spreadsheet_id: str, sheet: str, range: str, ctx: Context = None) -> Dict[str, Any]:
-    """Unmerge previously merged cells."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+                    # Generate unique table name
+                    table_name = f"Table_{sheet}_{int(time.time())}"
 
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"unmergeCells": {"range": _grid_range(sheet_id, range)}}]}
-    ).execute()
+                    # Build table spec
+                    table_spec = {
+                        "name": table_name,
+                        "range": grid,
+                        "columnProperties": column_properties
+                    }
 
+                    # Add custom colors if specified
+                    if 'header_color' in ts:
+                        header_color = _parse_color(ts['header_color'])
+                        band_color = ts.get('band_color', {"red": 1, "green": 1, "blue": 1})
+                        table_spec["rowsProperties"] = {
+                            "headerColorStyle": {"rgbColor": header_color},
+                            "firstBandColorStyle": {"rgbColor": {"red": 1, "green": 1, "blue": 1}},
+                            "secondBandColorStyle": {"rgbColor": band_color}
+                        }
 
-@mcp.tool()
-def auto_resize(spreadsheet_id: str, sheet: str, columns: Optional[str] = None, rows: Optional[str] = None, ctx: Context = None) -> Dict[str, Any]:
-    """
-    Auto-resize columns/rows to fit content.
-    columns: "A:D", "B:B", or "all" to resize all columns
-    rows: "1:10", "5:5", or "all" to resize all rows
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
-    requests = []
+                    # Add native table (like Format > Convert to Table)
+                    requests.append({"addTable": {"table": table_spec}})
 
-    if columns:
-        if columns.lower() == "all":
-            # Get sheet properties to find column count
-            spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-            for s in spreadsheet['sheets']:
-                if s['properties']['sheetId'] == sheet_id:
-                    col_count = s['properties'].get('gridProperties', {}).get('columnCount', 26)
+                    # Auto-resize columns
                     requests.append({"autoResizeDimensions": {"dimensions": {
                         "sheetId": sheet_id, "dimension": "COLUMNS",
-                        "startIndex": 0, "endIndex": col_count
+                        "startIndex": start_col, "endIndex": end_col
                     }}})
-                    break
-        else:
-            col_match = re.match(r'^([A-Za-z]+):([A-Za-z]+)$', columns)
-            if col_match:
-                requests.append({"autoResizeDimensions": {"dimensions": {
-                    "sheetId": sheet_id, "dimension": "COLUMNS",
-                    "startIndex": _col_to_index(col_match.group(1)),
-                    "endIndex": _col_to_index(col_match.group(2)) + 1
-                }}})
 
-    if rows:
-        if rows.lower() == "all":
-            # Get sheet properties to find row count
-            spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-            for s in spreadsheet['sheets']:
-                if s['properties']['sheetId'] == sheet_id:
-                    row_count = s['properties'].get('gridProperties', {}).get('rowCount', 1000)
-                    requests.append({"autoResizeDimensions": {"dimensions": {
-                        "sheetId": sheet_id, "dimension": "ROWS",
-                        "startIndex": 0, "endIndex": row_count
-                    }}})
-                    break
-        else:
-            row_match = re.match(r'^(\d+):(\d+)$', rows)
-            if row_match:
-                requests.append({"autoResizeDimensions": {"dimensions": {
-                    "sheetId": sheet_id, "dimension": "ROWS",
-                    "startIndex": int(row_match.group(1)) - 1,
-                    "endIndex": int(row_match.group(2))
-                }}})
+                    results['native_table'] = True
+                    results['table_name'] = table_name
 
-    if not requests:
-        return {"error": "Specify columns (A:D or 'all') and/or rows (1:10 or 'all')"}
+                else:
+                    # Legacy/basic table styling (manual formatting)
+                    # Header formatting
+                    if 'header' in ts and num_rows > 0:
+                        hdr_format, hdr_fields = _build_cell_format(**ts['header'])
+                        if hdr_format:
+                            requests.append({
+                                "repeatCell": {
+                                    "range": {"sheetId": sheet_id, "startRowIndex": start_row, "endRowIndex": start_row + 1,
+                                              "startColumnIndex": start_col, "endColumnIndex": end_col},
+                                    "cell": {"userEnteredFormat": hdr_format},
+                                    "fields": ",".join(hdr_fields)
+                                }
+                            })
 
-    return sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
+                    # Header border
+                    if 'header_border' in ts:
+                        hb = ts['header_border']
+                        border = _build_border(hb.get('style', 'solid'), hb.get('color', 'black'))
+                        border_req = {"range": {"sheetId": sheet_id, "startRowIndex": start_row, "endRowIndex": start_row + 1,
+                                                "startColumnIndex": start_col, "endColumnIndex": end_col}}
+                        sides = hb.get('sides', 'bottom')
+                        if sides == 'bottom':
+                            border_req['bottom'] = border
+                        elif sides == 'all':
+                            border_req.update({"top": border, "bottom": border, "left": border, "right": border})
+                        requests.append({"updateBorders": border_req})
 
+                    # Body border
+                    if 'body_border' in ts:
+                        bb = ts['body_border']
+                        border = _build_border(bb.get('style', 'solid'), bb.get('color', 'light_gray'))
+                        border_req = {"range": {"sheetId": sheet_id, "startRowIndex": start_row, "endRowIndex": end_row,
+                                                "startColumnIndex": start_col, "endColumnIndex": end_col}}
+                        sides = bb.get('sides', 'outer')
+                        if sides == 'outer':
+                            border_req.update({"top": border, "bottom": border, "left": border, "right": border})
+                        elif sides == 'all':
+                            border_req.update({"top": border, "bottom": border, "left": border, "right": border,
+                                               "innerHorizontal": border, "innerVertical": border})
+                        requests.append({"updateBorders": border_req})
 
-@mcp.tool()
-def freeze(spreadsheet_id: str, sheet: str, rows: int = 0, columns: int = 0, ctx: Context = None) -> Dict[str, Any]:
-    """Freeze rows and/or columns. Use 0 to unfreeze."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+                    # Striped rows
+                    if 'odd_rows' in ts and num_rows > 1:
+                        stripe_format, stripe_fields = _build_cell_format(**ts['odd_rows'])
+                        for row_idx in range(start_row + 2, end_row, 2):  # Every other row after header
+                            requests.append({
+                                "repeatCell": {
+                                    "range": {"sheetId": sheet_id, "startRowIndex": row_idx, "endRowIndex": row_idx + 1,
+                                              "startColumnIndex": start_col, "endColumnIndex": end_col},
+                                    "cell": {"userEnteredFormat": stripe_format},
+                                    "fields": ",".join(stripe_fields)
+                                }
+                            })
 
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"updateSheetProperties": {
-            "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": rows, "frozenColumnCount": columns}},
-            "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"
-        }}]}
-    ).execute()
+                    # Auto-resize
+                    if ts.get('auto_resize'):
+                        requests.append({"autoResizeDimensions": {"dimensions": {
+                            "sheetId": sheet_id, "dimension": "COLUMNS",
+                            "startIndex": start_col, "endIndex": end_col
+                        }}})
 
+            # Apply column types
+            if column_types:
+                for col_spec, fmt in column_types.items():
+                    col_indices = _parse_column_range(col_spec)
+                    resolved_fmt = _resolve_number_format(fmt)
+                    for col_idx in col_indices:
+                        abs_col = start_col + col_idx if col_idx < num_cols else col_idx
+                        requests.append({
+                            "repeatCell": {
+                                "range": {"sheetId": sheet_id, "startRowIndex": start_row + 1, "endRowIndex": end_row,
+                                          "startColumnIndex": abs_col, "endColumnIndex": abs_col + 1},
+                                "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": resolved_fmt}}},
+                                "fields": "userEnteredFormat.numberFormat"
+                            }
+                        })
 
-@mcp.tool()
-def delete_rows(spreadsheet_id: str, sheet: str, start_row: int, end_row: int, ctx: Context = None) -> Dict[str, Any]:
-    """Delete rows. start_row and end_row are 1-based (like Sheets UI), inclusive."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+            if requests:
+                format_result = sheets_service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id, body={"requests": requests}
+                ).execute()
+                results['format'] = {'requests_executed': len(requests)}
 
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"deleteDimension": {"range": {
-            "sheetId": sheet_id, "dimension": "ROWS",
-            "startIndex": start_row - 1, "endIndex": end_row
-        }}}]}
-    ).execute()
+        return results
 
+    # === CLEAR ===
+    elif action == "clear":
+        if not range:
+            return {"error": "range is required for clear action"}
+        full_range = f"{sheet}!{range}"
+        result = sheets_service.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id, range=full_range, body={}
+        ).execute()
+        return {'cleared': full_range, 'result': result}
 
-@mcp.tool()
-def delete_columns(spreadsheet_id: str, sheet: str, start_column: str, end_column: str, ctx: Context = None) -> Dict[str, Any]:
-    """Delete columns. Use letters like "B" to "D" (inclusive)."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    # === SEARCH ===
+    elif action == "search":
+        full_range = f"{sheet}!{range}" if range else sheet
+        result = sheets_service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=full_range).execute()
+        rows = result.get('values', [])
 
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"deleteDimension": {"range": {
-            "sheetId": sheet_id, "dimension": "COLUMNS",
-            "startIndex": _col_to_index(start_column), "endIndex": _col_to_index(end_column) + 1
-        }}}]}
-    ).execute()
+        if not rows or not filters:
+            return {'filtered_rows': rows if include_header else rows[1:], 'total_rows': len(rows), 'matched_rows': len(rows) - 1}
 
+        header = rows[0] if rows else []
 
-@mcp.tool()
-def clear_formatting(spreadsheet_id: str, sheet: str, range: str, ctx: Context = None) -> Dict[str, Any]:
-    """Clear formatting from cells (keeps values)."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+        # Resolve column references
+        resolved_filters = []
+        for f in filters:
+            col = f.get('column', '')
+            col_idx = -1
+            if len(col) <= 3 and col.isalpha():
+                col_idx = _col_to_index(col.upper())
+            else:
+                for i, h in enumerate(header):
+                    if str(h).lower() == col.lower():
+                        col_idx = i
+                        break
+            if col_idx == -1:
+                return {'error': f'Column "{col}" not found'}
+            resolved_filters.append({'col_idx': col_idx, 'op': f.get('op', 'equals'), 'value': f.get('value', '')})
 
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"repeatCell": {
-            "range": _grid_range(sheet_id, range),
-            "cell": {"userEnteredFormat": {}},
-            "fields": "userEnteredFormat"
-        }}]}
-    ).execute()
+        def check_condition(row, flt):
+            col_idx, op, value = flt['col_idx'], flt['op'], flt['value']
+            cell_val = str(row[col_idx]).strip() if col_idx < len(row) and row[col_idx] else ''
+            val = str(value).strip() if value else ''
+            cell_lower, val_lower = cell_val.lower(), val.lower()
 
+            if op == 'equals': return cell_lower == val_lower
+            elif op == 'not_equals': return cell_lower != val_lower
+            elif op == 'contains': return val_lower in cell_lower
+            elif op == 'not_contains': return val_lower not in cell_lower
+            elif op == 'starts_with': return cell_lower.startswith(val_lower)
+            elif op == 'ends_with': return cell_lower.endswith(val_lower)
+            elif op == 'empty': return cell_val == ''
+            elif op == 'not_empty': return cell_val != ''
+            elif op == 'regex': return bool(re.search(val, cell_val, re.IGNORECASE))
+            elif op in ('gt', 'gte', 'lt', 'lte'):
+                try:
+                    cell_num, val_num = float(cell_val.replace(',', '')), float(val.replace(',', ''))
+                    if op == 'gt': return cell_num > val_num
+                    elif op == 'gte': return cell_num >= val_num
+                    elif op == 'lt': return cell_num < val_num
+                    elif op == 'lte': return cell_num <= val_num
+                except: return False
+            return False
 
-@mcp.tool()
-def set_column_width(spreadsheet_id: str, sheet: str, column: str, width: int, ctx: Context = None) -> Dict[str, Any]:
-    """Set column width in pixels. column: letter like "A" or "BC"."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
-    col_idx = _col_to_index(column)
+        def row_matches(row):
+            if match_all:
+                return all(check_condition(row, f) for f in resolved_filters)
+            return any(check_condition(row, f) for f in resolved_filters)
 
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"updateDimensionProperties": {
-            "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": col_idx, "endIndex": col_idx + 1},
-            "properties": {"pixelSize": width}, "fields": "pixelSize"
-        }}]}
-    ).execute()
+        filtered = ([header] if include_header else []) + [r for r in rows[1:] if row_matches(r)]
+        return {'filtered_rows': filtered, 'total_rows': len(rows), 'matched_rows': len(filtered) - (1 if include_header else 0)}
 
-
-@mcp.tool()
-def set_row_height(spreadsheet_id: str, sheet: str, row: int, height: int, ctx: Context = None) -> Dict[str, Any]:
-    """Set row height in pixels. row: 1-based row number."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
-
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"updateDimensionProperties": {
-            "range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": row - 1, "endIndex": row},
-            "properties": {"pixelSize": height}, "fields": "pixelSize"
-        }}]}
-    ).execute()
-
-
-@mcp.tool()
-def add_dropdown(spreadsheet_id: str, sheet: str, range: str, options: List[str], strict: bool = True, ctx: Context = None) -> Dict[str, Any]:
-    """Add dropdown (data validation) to cells."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
-
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"setDataValidation": {
-            "range": _grid_range(sheet_id, range),
-            "rule": {
-                "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": opt} for opt in options]},
-                "showCustomUi": True, "strict": strict
+    # === REPLACE ===
+    elif action == "replace":
+        if not find:
+            return {"error": "find is required for replace action"}
+        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+        request = {
+            "findReplace": {
+                "find": find,
+                "replacement": replace_with or "",
+                "matchCase": match_case,
+                "searchByRegex": use_regex,
+                "sheetId": sheet_id
             }
-        }}]}
-    ).execute()
+        }
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [request]}
+        ).execute()
+        replies = result.get('replies', [])
+        if replies and 'findReplace' in replies[0]:
+            fr = replies[0]['findReplace']
+            return {'occurrences_changed': fr.get('occurrencesChanged', 0), 'values_changed': fr.get('valuesChanged', 0)}
+        return {'occurrences_changed': 0}
 
+    # === SORT ===
+    elif action == "sort":
+        if not range:
+            return {"error": "range is required for sort action"}
+        if not sort_by:
+            return {"error": "sort_by is required for sort action"}
 
-@mcp.tool()
-def get_colors(ctx: Context = None) -> Dict[str, Dict[str, float]]:
-    """Get available named colors."""
-    return COLORS
+        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+        start_row, end_row, start_col, end_col = _parse_a1(range)
 
+        # Build sort specs
+        sort_specs = []
+        for spec in sort_by:
+            col = spec.get('column', 'A')
+            col_idx = _col_to_index(col) if col.isalpha() else int(col)
+            order = spec.get('order', 'asc').upper()
+            sort_specs.append({
+                "dimensionIndex": col_idx,
+                "sortOrder": "DESCENDING" if order == "DESC" else "ASCENDING"
+            })
 
-@mcp.tool()
-def batch_format(spreadsheet_id: str,
-                 sheet: str,
-                 formats: List[Dict[str, Any]],
-                 ctx: Context = None) -> Dict[str, Any]:
-    """
-    Apply multiple formatting operations in a single API call.
-    Much more efficient than calling format_cells multiple times.
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"sortRange": {
+                "range": {"sheetId": sheet_id, "startRowIndex": start_row, "endRowIndex": end_row,
+                          "startColumnIndex": start_col, "endColumnIndex": end_col},
+                "sortSpecs": sort_specs
+            }}]}
+        ).execute()
+        return {'sorted': f"{sheet}!{range}", 'sort_specs': sort_specs}
 
-    Args:
-        spreadsheet_id: The spreadsheet ID
-        sheet: Sheet name (e.g., "Sheet1")
-        formats: List of format specs, each containing:
-            - range: Cell range in A1 notation (e.g., "A1:B5")
-            - bold, italic, underline, strikethrough: bool
-            - font_size: int
-            - font_color, bg_color: color string (named, hex, or rgb)
-            - h_align: "left", "center", "right"
-            - v_align: "top", "middle", "bottom"
-            - wrap: "overflow", "clip", "wrap"
-            - number_format: pattern string
-            - border: border style - "solid", "dashed", "dotted", "double", "none"
-            - border_color: border color (default: "black")
-            - border_sides: "all", "outer", "inner", or "top,bottom,left,right"
+    # === DIAGRAM (ASCII art / text diagrams) ===
+    elif action == "diagram":
+        if not data:
+            return {"error": "data (multi-line text string or list of lines) is required for diagram action"}
 
-    Example:
-        batch_format(id, "Sheet1", [
-            {"range": "A1:Z1", "bold": True, "bg_color": "light_blue", "border": "solid", "border_sides": "bottom"},
-            {"range": "A3:A100", "font_color": "blue"},
-            {"range": "B3:B100", "font_color": "green", "border": "dashed", "border_color": "gray"}
-        ])
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
-    requests = []
+        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
 
-    for fmt in formats:
-        cell_range = fmt.get('range')
-        if not cell_range:
-            continue
+        # Parse starting position
+        start_row, _, start_col, _ = _parse_a1(range) if range else (0, None, 0, None)
 
-        cell_format = {}
-        text_format = {}
-        fields = []
+        # Convert data to lines
+        if isinstance(data, str):
+            lines = data.split('\n')
+        elif isinstance(data, list) and all(isinstance(item, str) for item in data):
+            lines = data
+        elif isinstance(data, list) and all(isinstance(item, list) for item in data):
+            lines = [row[0] if row else '' for row in data]
+        else:
+            return {"error": "data must be a multi-line string or list of strings"}
 
-        # Text formatting
-        if fmt.get('bold') is not None:
-            text_format["bold"] = fmt['bold']
-        if fmt.get('italic') is not None:
-            text_format["italic"] = fmt['italic']
-        if fmt.get('underline') is not None:
-            text_format["underline"] = fmt['underline']
-        if fmt.get('strikethrough') is not None:
-            text_format["strikethrough"] = fmt['strikethrough']
-        if fmt.get('font_size') is not None:
-            text_format["fontSize"] = fmt['font_size']
-        if fmt.get('font_color'):
-            text_format["foregroundColor"] = _parse_color(fmt['font_color'])
+        # Write each line as a row (single column)
+        values = [[line] for line in lines]
+        write_range = f"{sheet}!{_index_to_col(start_col)}{start_row + 1}"
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=write_range,
+            valueInputOption="RAW", body={"values": values}
+        ).execute()
 
-        if text_format:
-            cell_format["textFormat"] = text_format
-            fields.append("userEnteredFormat.textFormat")
+        num_rows = len(lines)
+        max_line_length = max(len(line) for line in lines) if lines else 0
 
-        # Background
-        if fmt.get('bg_color'):
-            cell_format["backgroundColor"] = _parse_color(fmt['bg_color'])
-            fields.append("userEnteredFormat.backgroundColor")
+        # Build formatting requests
+        requests = []
 
-        # Alignment
-        if fmt.get('h_align'):
-            cell_format["horizontalAlignment"] = {"left": "LEFT", "center": "CENTER", "right": "RIGHT"}.get(fmt['h_align'].lower(), fmt['h_align'].upper())
-            fields.append("userEnteredFormat.horizontalAlignment")
-        if fmt.get('v_align'):
-            cell_format["verticalAlignment"] = {"top": "TOP", "middle": "MIDDLE", "bottom": "BOTTOM"}.get(fmt['v_align'].lower(), fmt['v_align'].upper())
-            fields.append("userEnteredFormat.verticalAlignment")
+        # Apply monospace font formatting
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": start_row, "endRowIndex": start_row + num_rows,
+                          "startColumnIndex": start_col, "endColumnIndex": start_col + 1},
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {"fontFamily": "Courier New", "fontSize": 10},
+                    "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+                    "wrapStrategy": "CLIP"
+                }},
+                "fields": "userEnteredFormat.textFormat,userEnteredFormat.backgroundColor,userEnteredFormat.wrapStrategy"
+            }
+        })
 
-        # Wrap
-        if fmt.get('wrap'):
-            cell_format["wrapStrategy"] = {"overflow": "OVERFLOW_CELL", "clip": "CLIP", "wrap": "WRAP"}.get(fmt['wrap'].lower(), fmt['wrap'].upper())
-            fields.append("userEnteredFormat.wrapStrategy")
+        # Set column width for monospace font (Courier New 10pt ≈ 8px per char)
+        col_width = max(150, max_line_length * 8 + 16)
+        requests.append({
+            "updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": start_col, "endIndex": start_col + 1},
+                "properties": {"pixelSize": col_width},
+                "fields": "pixelSize"
+            }
+        })
 
-        # Number format
-        if fmt.get('number_format'):
-            cell_format["numberFormat"] = {"type": "NUMBER", "pattern": fmt['number_format']}
-            fields.append("userEnteredFormat.numberFormat")
+        # Set row height for consistent spacing (18 pixels works well for 10pt font)
+        requests.append({
+            "updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": start_row, "endIndex": start_row + num_rows},
+                "properties": {"pixelSize": 18},
+                "fields": "pixelSize"
+            }
+        })
 
-        # Add cell format request if any formatting specified
-        if cell_format and fields:
+        # Optionally hide gridlines (if style contains 'clean' or hide_gridlines flag)
+        hide_gridlines = style and 'clean' in style.lower() if style else False
+        if hide_gridlines:
             requests.append({
-                "repeatCell": {
-                    "range": _grid_range(sheet_id, cell_range),
-                    "cell": {"userEnteredFormat": cell_format},
-                    "fields": ",".join(fields)
+                "updateSheetProperties": {
+                    "properties": {"sheetId": sheet_id, "gridProperties": {"hideGridlines": True}},
+                    "fields": "gridProperties.hideGridlines"
                 }
             })
 
-        # Border formatting (separate request type)
-        if fmt.get('border'):
-            style = fmt.get('border', 'solid')
-            color = fmt.get('border_color', 'black')
-            sides = fmt.get('border_sides', 'all')
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": requests}
+        ).execute()
 
-            border_style = {"solid": "SOLID", "dashed": "DASHED", "dotted": "DOTTED", "double": "DOUBLE", "none": "NONE"}.get(style.lower(), "SOLID")
-            border = {"style": border_style, "color": _parse_color(color)}
+        return {
+            'diagram_created': f"{sheet}!{_index_to_col(start_col)}{start_row + 1}:{_index_to_col(start_col)}{start_row + num_rows}",
+            'lines': num_rows,
+            'max_width': max_line_length,
+            'gridlines_hidden': hide_gridlines
+        }
 
-            req = {"range": _grid_range(sheet_id, cell_range)}
-            s = sides.lower()
+    return {"error": f"Unknown action: {action}"}
 
-            if s == "all":
-                req.update({"top": border, "bottom": border, "left": border, "right": border, "innerHorizontal": border, "innerVertical": border})
-            elif s == "outer":
-                req.update({"top": border, "bottom": border, "left": border, "right": border})
-            elif s == "inner":
-                req.update({"innerHorizontal": border, "innerVertical": border})
-            else:
-                for side in s.split(","):
-                    side = side.strip()
-                    if side in ["top", "bottom", "left", "right"]:
-                        req[side] = border
 
-            requests.append({"updateBorders": req})
-
-    if not requests:
-        return {"error": "No valid formatting operations specified"}
-
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": requests}
-    ).execute()
-
+# =============================================================================
+# TOOL 2: sheets_format - Style/Border/Merge/Conditional/Clear
+# =============================================================================
 
 @mcp.tool()
-def write_sheet(spreadsheet_id: str,
-                sheet: str,
-                range: str,
-                data: List[List[Any]],
-                formats: Optional[List[Dict[str, Any]]] = None,
-                auto_resize_columns: bool = False,
-                ctx: Context = None) -> Dict[str, Any]:
+def sheets_format(
+    spreadsheet_id: str,
+    sheet: str,
+    action: str,
+    range: str,
+    # Style options
+    style: Optional[str] = None,
+    bold: Optional[bool] = None,
+    italic: Optional[bool] = None,
+    underline: Optional[bool] = None,
+    strikethrough: Optional[bool] = None,
+    font_size: Optional[int] = None,
+    font_color: Optional[str] = None,
+    font_family: Optional[str] = None,
+    bg_color: Optional[str] = None,
+    align: Optional[str] = None,
+    valign: Optional[str] = None,
+    wrap: Optional[str] = None,
+    number_format: Optional[str] = None,
+    # Border options
+    border_style: str = "solid",
+    border_color: str = "black",
+    border_sides: str = "all",
+    # Conditional format options
+    rule: Optional[str] = None,
+    condition: Optional[Dict[str, Any]] = None,
+    # Batch mode
+    formats: Optional[List[Dict[str, Any]]] = None,
+    ctx: Context = None
+) -> Dict[str, Any]:
     """
-    Write data and optionally apply formatting in a single operation.
-    Combines update_cells + batch_format + auto_resize.
+    Unified formatting operations for Google Sheets.
 
-    Args:
-        spreadsheet_id: The spreadsheet ID
-        sheet: Sheet name (e.g., "Sheet1")
-        range: Starting cell in A1 notation (e.g., "A1")
-        data: 2D array of values to write
-        formats: Optional list of format specs (same as batch_format, including borders)
-        auto_resize_columns: Auto-resize columns after writing (default: False)
+    Actions:
+        style: Apply text/cell formatting (use presets like "h1", "header", "success" or explicit params)
+        border: Set cell borders
+        merge: Merge cells in range
+        unmerge: Unmerge cells in range
+        conditional: Apply conditional formatting rules
+        clear: Clear all formatting (keeps values)
 
-    Example:
-        write_sheet(id, "Sheet1", "A1",
-            data=[["Name", "Value"], ["Foo", 100], ["Bar", 200]],
-            formats=[
-                {"range": "A1:B1", "bold": True, "bg_color": "light_blue", "border": "solid", "border_sides": "bottom"},
-                {"range": "A1:B3", "border": "solid", "border_sides": "outer"}
-            ],
-            auto_resize_columns=True
-        )
+    Style presets: h1, h2, h3, title, subtitle, header, bold, italic, center, right, success, error, warning, muted, highlight, code
+
+    Number format presets: currency, percent, date, number, decimal, accounting, etc.
+
+    Border sides: "all", "outer", "inner", "top", "bottom", "left", "right" (comma-separated)
+
+    Conditional rules: "color_scale", "data_bar", "greater_than", "less_than", "between", "text_contains", "custom"
+
+    Examples:
+        # Apply header style
+        sheets_format(id, "Sheet1", "style", "A1:F1", style="h1")
+
+        # Custom formatting
+        sheets_format(id, "Sheet1", "style", "B2:B100", bold=True, font_color="green", number_format="currency")
+
+        # Add borders
+        sheets_format(id, "Sheet1", "border", "A1:F10", border_style="solid", border_sides="outer")
+
+        # Merge cells
+        sheets_format(id, "Sheet1", "merge", "A1:C1")
+
+        # Conditional formatting - color scale
+        sheets_format(id, "Sheet1", "conditional", "B2:B100", rule="color_scale", condition={"min_color": "red", "max_color": "green"})
+
+        # Batch formatting
+        sheets_format(id, "Sheet1", "style", "A1", formats=[{"range": "A1:F1", "style": "header"}, {"range": "B2:B100", "number_format": "currency"}])
     """
     sheets_service = ctx.request_context.lifespan_context.sheets_service
-    results = {}
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    action = action.lower()
 
-    # Step 1: Write data
-    write_result = sheets_service.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id, range=f"{sheet}!{range}",
-        valueInputOption='USER_ENTERED', body={'values': data}
-    ).execute()
-    results['write'] = write_result
-
-    # Step 2: Apply formatting if specified
-    if formats or auto_resize_columns:
-        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    # === STYLE ===
+    if action == "style":
         requests = []
 
-        # Format requests (reuse batch_format logic)
+        # Batch mode
         if formats:
             for fmt in formats:
-                cell_range = fmt.get('range')
-                if not cell_range:
-                    continue
+                fmt_range = fmt.get('range', range)
+                # Merge preset style with explicit params
+                merged = {}
+                if fmt.get('style'):
+                    merged.update(_resolve_style(fmt['style']))
+                for k in ['bold', 'italic', 'underline', 'strikethrough', 'font_size', 'font_color', 'font_family', 'bg_color', 'h_align', 'v_align', 'wrap', 'number_format']:
+                    if fmt.get(k) is not None:
+                        merged[k] = fmt[k]
 
-                cell_format = {}
-                text_format = {}
-                fields = []
-
-                if fmt.get('bold') is not None:
-                    text_format["bold"] = fmt['bold']
-                if fmt.get('italic') is not None:
-                    text_format["italic"] = fmt['italic']
-                if fmt.get('underline') is not None:
-                    text_format["underline"] = fmt['underline']
-                if fmt.get('strikethrough') is not None:
-                    text_format["strikethrough"] = fmt['strikethrough']
-                if fmt.get('font_size') is not None:
-                    text_format["fontSize"] = fmt['font_size']
-                if fmt.get('font_color'):
-                    text_format["foregroundColor"] = _parse_color(fmt['font_color'])
-
-                if text_format:
-                    cell_format["textFormat"] = text_format
-                    fields.append("userEnteredFormat.textFormat")
-
-                if fmt.get('bg_color'):
-                    cell_format["backgroundColor"] = _parse_color(fmt['bg_color'])
-                    fields.append("userEnteredFormat.backgroundColor")
-
-                if fmt.get('h_align'):
-                    cell_format["horizontalAlignment"] = {"left": "LEFT", "center": "CENTER", "right": "RIGHT"}.get(fmt['h_align'].lower(), fmt['h_align'].upper())
-                    fields.append("userEnteredFormat.horizontalAlignment")
-                if fmt.get('v_align'):
-                    cell_format["verticalAlignment"] = {"top": "TOP", "middle": "MIDDLE", "bottom": "BOTTOM"}.get(fmt['v_align'].lower(), fmt['v_align'].upper())
-                    fields.append("userEnteredFormat.verticalAlignment")
-
-                if fmt.get('wrap'):
-                    cell_format["wrapStrategy"] = {"overflow": "OVERFLOW_CELL", "clip": "CLIP", "wrap": "WRAP"}.get(fmt['wrap'].lower(), fmt['wrap'].upper())
-                    fields.append("userEnteredFormat.wrapStrategy")
-
-                if fmt.get('number_format'):
-                    cell_format["numberFormat"] = {"type": "NUMBER", "pattern": fmt['number_format']}
-                    fields.append("userEnteredFormat.numberFormat")
-
-                if cell_format and fields:
+                cell_format, fields = _build_cell_format(**merged)
+                if cell_format:
                     requests.append({
                         "repeatCell": {
-                            "range": _grid_range(sheet_id, cell_range),
+                            "range": _grid_range(sheet_id, fmt_range),
                             "cell": {"userEnteredFormat": cell_format},
                             "fields": ",".join(fields)
                         }
                     })
+        else:
+            # Single range mode - merge preset with explicit params
+            merged = {}
+            if style:
+                merged.update(_resolve_style(style))
+            for k, v in [('bold', bold), ('italic', italic), ('underline', underline), ('strikethrough', strikethrough),
+                         ('font_size', font_size), ('font_color', font_color), ('font_family', font_family), ('bg_color', bg_color),
+                         ('h_align', align), ('v_align', valign), ('wrap', wrap), ('number_format', number_format)]:
+                if v is not None:
+                    merged[k] = v
 
-                # Border formatting
-                if fmt.get('border'):
-                    style = fmt.get('border', 'solid')
-                    color = fmt.get('border_color', 'black')
-                    sides = fmt.get('border_sides', 'all')
+            cell_format, fields = _build_cell_format(**merged)
+            if cell_format:
+                requests.append({
+                    "repeatCell": {
+                        "range": _grid_range(sheet_id, range),
+                        "cell": {"userEnteredFormat": cell_format},
+                        "fields": ",".join(fields)
+                    }
+                })
 
-                    border_style = {"solid": "SOLID", "dashed": "DASHED", "dotted": "DOTTED", "double": "DOUBLE", "none": "NONE"}.get(style.lower(), "SOLID")
-                    border = {"style": border_style, "color": _parse_color(color)}
+        if not requests:
+            return {"error": "No formatting options specified"}
 
-                    req = {"range": _grid_range(sheet_id, cell_range)}
-                    s = sides.lower()
-
-                    if s == "all":
-                        req.update({"top": border, "bottom": border, "left": border, "right": border, "innerHorizontal": border, "innerVertical": border})
-                    elif s == "outer":
-                        req.update({"top": border, "bottom": border, "left": border, "right": border})
-                    elif s == "inner":
-                        req.update({"innerHorizontal": border, "innerVertical": border})
-                    else:
-                        for side in s.split(","):
-                            side = side.strip()
-                            if side in ["top", "bottom", "left", "right"]:
-                                req[side] = border
-
-                    requests.append({"updateBorders": req})
-
-        # Auto-resize columns
-        if auto_resize_columns:
-            if data and data[0]:
-                start_col = _col_to_index(re.match(r'^([A-Za-z]+)', range).group(1))
-                end_col = start_col + len(data[0])
-                requests.append({"autoResizeDimensions": {"dimensions": {
-                    "sheetId": sheet_id, "dimension": "COLUMNS",
-                    "startIndex": start_col, "endIndex": end_col
-                }}})
-
-        if requests:
-            format_result = sheets_service.spreadsheets().batchUpdate(
-                spreadsheetId=spreadsheet_id,
-                body={"requests": requests}
-            ).execute()
-            results['format'] = format_result
-
-    return results
-
-
-# =============================================================================
-# DATA TOOLS (ORIGINAL, PRESERVED)
-# =============================================================================
-
-@mcp.tool()
-def get_sheet_data(spreadsheet_id: str, sheet: str, range: Optional[str] = None, include_grid_data: bool = False, ctx: Context = None) -> Dict[str, Any]:
-    """Get data from a sheet. range: A1 notation like "A1:C10". include_grid_data: also return formatting."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    full_range = f"{sheet}!{range}" if range else sheet
-
-    if include_grid_data:
-        return sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id, ranges=[full_range], includeGridData=True).execute()
-    else:
-        result = sheets_service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=full_range).execute()
-        return {'spreadsheetId': spreadsheet_id, 'valueRanges': [{'range': full_range, 'values': result.get('values', [])}]}
-
-
-@mcp.tool()
-def get_sheet_formulas(spreadsheet_id: str, sheet: str, range: Optional[str] = None, ctx: Context = None) -> List[List[Any]]:
-    """Get formulas from a sheet."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    full_range = f"{sheet}!{range}" if range else sheet
-    result = sheets_service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=full_range, valueRenderOption='FORMULA').execute()
-    return result.get('values', [])
-
-
-@mcp.tool()
-def update_cells(spreadsheet_id: str, sheet: str, range: str, data: List[List[Any]], ctx: Context = None) -> Dict[str, Any]:
-    """Update cells. data: 2D array of values."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    return sheets_service.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id, range=f"{sheet}!{range}",
-        valueInputOption='USER_ENTERED', body={'values': data}
-    ).execute()
-
-
-@mcp.tool()
-def batch_update_cells(spreadsheet_id: str, sheet: str, ranges: Dict[str, List[List[Any]]], ctx: Context = None) -> Dict[str, Any]:
-    """Batch update multiple ranges. ranges: {"A1:B2": [[1,2],[3,4]], "D1:E2": [["a","b"],["c","d"]]}"""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    data = [{'range': f"{sheet}!{r}", 'values': v} for r, v in ranges.items()]
-    return sheets_service.spreadsheets().values().batchUpdate(
-        spreadsheetId=spreadsheet_id, body={'valueInputOption': 'USER_ENTERED', 'data': data}
-    ).execute()
-
-
-@mcp.tool()
-def add_rows(spreadsheet_id: str, sheet: str, count: int, start_row: Optional[int] = None, ctx: Context = None) -> Dict[str, Any]:
-    """Add rows. start_row: 1-based row to insert before (default: beginning)."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
-    start_idx = (start_row - 1) if start_row else 0
-
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"insertDimension": {"range": {
-            "sheetId": sheet_id, "dimension": "ROWS", "startIndex": start_idx, "endIndex": start_idx + count
-        }, "inheritFromBefore": start_idx > 0}}]}
-    ).execute()
-
-
-@mcp.tool()
-def add_columns(spreadsheet_id: str, sheet: str, count: int, start_column: Optional[str] = None, ctx: Context = None) -> Dict[str, Any]:
-    """Add columns. start_column: letter to insert before (default: beginning)."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
-    start_idx = _col_to_index(start_column) if start_column else 0
-
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"insertDimension": {"range": {
-            "sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": start_idx, "endIndex": start_idx + count
-        }, "inheritFromBefore": start_idx > 0}}]}
-    ).execute()
-
-
-@mcp.tool()
-def clear_range(spreadsheet_id: str, sheet: str, range: str,
-                clear_contents: bool = True, clear_formatting: bool = False,
-                ctx: Context = None) -> Dict[str, Any]:
-    """
-    Clear cell contents and/or formatting in a range.
-
-    Args:
-        spreadsheet_id: The spreadsheet ID
-        sheet: Sheet name (e.g., "Sheet1")
-        range: Cell range in A1 notation (e.g., "A1:Z100")
-        clear_contents: Clear cell values (default: True)
-        clear_formatting: Also clear formatting (default: False)
-
-    Example:
-        clear_range(id, "Sheet1", "A1:Z100")  # Clear contents only
-        clear_range(id, "Sheet1", "A1:Z100", clear_formatting=True)  # Clear everything
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    full_range = f"{sheet}!{range}"
-    results = {}
-
-    if clear_contents:
-        # Clear values using values().clear()
-        result = sheets_service.spreadsheets().values().clear(
-            spreadsheetId=spreadsheet_id,
-            range=full_range,
-            body={}
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": requests}
         ).execute()
-        results['contents_cleared'] = result
+        return {'formatted': range, 'requests_executed': len(requests)}
 
-    if clear_formatting:
-        # Clear formatting using batchUpdate
+    # === BORDER ===
+    elif action == "border":
+        border = _build_border(border_style, border_color)
+        req = {"range": _grid_range(sheet_id, range)}
+        sides = border_sides.lower()
+
+        if sides == "all":
+            req.update({"top": border, "bottom": border, "left": border, "right": border, "innerHorizontal": border, "innerVertical": border})
+        elif sides == "outer":
+            req.update({"top": border, "bottom": border, "left": border, "right": border})
+        elif sides == "inner":
+            req.update({"innerHorizontal": border, "innerVertical": border})
+        else:
+            for side in sides.split(","):
+                side = side.strip()
+                if side in ["top", "bottom", "left", "right"]:
+                    req[side] = border
+
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [{"updateBorders": req}]}
+        ).execute()
+        return {'bordered': range, 'style': border_style, 'sides': border_sides}
+
+    # === MERGE ===
+    elif action == "merge":
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"mergeCells": {"range": _grid_range(sheet_id, range), "mergeType": "MERGE_ALL"}}]}
+        ).execute()
+        return {'merged': range}
+
+    # === UNMERGE ===
+    elif action == "unmerge":
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"unmergeCells": {"range": _grid_range(sheet_id, range)}}]}
+        ).execute()
+        return {'unmerged': range}
+
+    # === CONDITIONAL ===
+    elif action == "conditional":
+        if not rule:
+            return {"error": "rule is required for conditional formatting"}
+
+        condition = condition or {}
+        grid = _grid_range(sheet_id, range)
+        requests = []
+
+        if rule == "color_scale":
+            min_color = _parse_color(condition.get('min_color', 'red'))
+            mid_color = _parse_color(condition.get('mid_color')) if condition.get('mid_color') else None
+            max_color = _parse_color(condition.get('max_color', 'green'))
+
+            gradient = {
+                "minpoint": {"color": min_color, "type": "MIN"},
+                "maxpoint": {"color": max_color, "type": "MAX"}
+            }
+            if mid_color:
+                gradient["midpoint"] = {"color": mid_color, "type": "PERCENTILE", "value": "50"}
+
+            requests.append({
+                "addConditionalFormatRule": {
+                    "rule": {"ranges": [grid], "gradientRule": gradient},
+                    "index": 0
+                }
+            })
+
+        elif rule == "data_bar":
+            bar_color = _parse_color(condition.get('color', 'blue'))
+            requests.append({
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [grid],
+                        "gradientRule": {
+                            "minpoint": {"color": {"red": 1, "green": 1, "blue": 1}, "type": "MIN"},
+                            "maxpoint": {"color": bar_color, "type": "MAX"}
+                        }
+                    },
+                    "index": 0
+                }
+            })
+
+        elif rule in ("greater_than", "less_than", "between", "text_contains"):
+            fmt = {"backgroundColor": _parse_color(condition.get('bg_color', 'light_yellow'))}
+            if condition.get('font_color'):
+                fmt["textFormat"] = {"foregroundColor": _parse_color(condition['font_color'])}
+
+            bool_condition = {}
+            if rule == "greater_than":
+                bool_condition = {"type": "NUMBER_GREATER", "values": [{"userEnteredValue": str(condition.get('value', 0))}]}
+            elif rule == "less_than":
+                bool_condition = {"type": "NUMBER_LESS", "values": [{"userEnteredValue": str(condition.get('value', 0))}]}
+            elif rule == "between":
+                bool_condition = {"type": "NUMBER_BETWEEN", "values": [
+                    {"userEnteredValue": str(condition.get('min', 0))},
+                    {"userEnteredValue": str(condition.get('max', 100))}
+                ]}
+            elif rule == "text_contains":
+                bool_condition = {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": str(condition.get('text', ''))}]}
+
+            requests.append({
+                "addConditionalFormatRule": {
+                    "rule": {"ranges": [grid], "booleanRule": {"condition": bool_condition, "format": fmt}},
+                    "index": 0
+                }
+            })
+
+        elif rule == "custom":
+            # Custom formula-based rule
+            formula = condition.get('formula', '')
+            fmt = {"backgroundColor": _parse_color(condition.get('bg_color', 'light_yellow'))}
+            if condition.get('font_color'):
+                fmt["textFormat"] = {"foregroundColor": _parse_color(condition['font_color'])}
+
+            requests.append({
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [grid],
+                        "booleanRule": {
+                            "condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": formula}]},
+                            "format": fmt
+                        }
+                    },
+                    "index": 0
+                }
+            })
+
+        if not requests:
+            return {"error": f"Unknown conditional rule: {rule}"}
+
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": requests}
+        ).execute()
+        return {'conditional_format_applied': range, 'rule': rule}
+
+    # === CLEAR ===
+    elif action == "clear":
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"repeatCell": {
+                "range": _grid_range(sheet_id, range),
+                "cell": {"userEnteredFormat": {}},
+                "fields": "userEnteredFormat"
+            }}]}
+        ).execute()
+        return {'formatting_cleared': range}
+
+    return {"error": f"Unknown action: {action}"}
+
+
+# =============================================================================
+# TOOL 3: sheets_structure - Resize/Freeze/Rows/Cols/Validate
+# =============================================================================
+
+@mcp.tool()
+def sheets_structure(
+    spreadsheet_id: str,
+    sheet: str,
+    action: str,
+    # Resize options
+    columns: Optional[str] = None,
+    rows: Optional[str] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    auto: bool = True,
+    # Freeze options
+    freeze_rows: int = 0,
+    freeze_cols: int = 0,
+    # Row/Column modification
+    start: Optional[Union[int, str]] = None,
+    end: Optional[Union[int, str]] = None,
+    count: int = 1,
+    # Validation options
+    range: Optional[str] = None,
+    validation: Optional[str] = None,
+    options: Optional[List[str]] = None,
+    min_value: Optional[float] = None,
+    max_value: Optional[float] = None,
+    custom_formula: Optional[str] = None,
+    allow_invalid: bool = False,
+    ctx: Context = None
+) -> Dict[str, Any]:
+    """
+    Structural operations for Google Sheets.
+
+    Actions:
+        resize: Auto-resize or set explicit width/height for columns/rows
+        freeze: Freeze rows and/or columns
+        add_rows: Insert new rows
+        add_cols: Insert new columns
+        delete_rows: Delete rows
+        delete_cols: Delete columns
+        table: Convert range to native Google Sheets Table (Format > Convert to Table)
+        validate: Add data validation (dropdown, number range, date, checkbox, custom)
+
+    Table styles (via validation param): "table" (default), "table_green", "table_gray", "table_red"
+    Or pass custom table name: validation="MyTableName"
+
+    Examples:
+        # Auto-resize all columns
+        sheets_structure(id, "Sheet1", "resize", columns="all")
+
+        # Set specific column width
+        sheets_structure(id, "Sheet1", "resize", columns="A:C", width=150, auto=False)
+
+        # Freeze header row
+        sheets_structure(id, "Sheet1", "freeze", freeze_rows=1)
+
+        # Insert 5 rows at row 10
+        sheets_structure(id, "Sheet1", "add_rows", start=10, count=5)
+
+        # Delete columns B through D
+        sheets_structure(id, "Sheet1", "delete_cols", start="B", end="D")
+
+        # Convert existing range to native table (like Format > Convert to Table)
+        sheets_structure(id, "Sheet1", "table", range="A1:F100")
+
+        # Convert to table with gray color theme
+        sheets_structure(id, "Sheet1", "table", range="A1:F100", validation="table_gray")
+
+        # Convert to table with custom name
+        sheets_structure(id, "Sheet1", "table", range="A1:F100", validation="SalesData")
+
+        # Add dropdown validation
+        sheets_structure(id, "Sheet1", "validate", range="D2:D100", validation="dropdown", options=["Active", "Inactive", "Pending"])
+
+        # Add number validation
+        sheets_structure(id, "Sheet1", "validate", range="E2:E100", validation="number", min_value=0, max_value=100)
+
+        # Add checkbox
+        sheets_structure(id, "Sheet1", "validate", range="F2:F100", validation="checkbox")
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    action = action.lower()
+
+    # === RESIZE ===
+    if action == "resize":
+        requests = []
+
+        if columns:
+            if auto and not width:
+                # Auto-resize columns
+                if columns.lower() == "all":
+                    spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+                    for s in spreadsheet['sheets']:
+                        if s['properties']['sheetId'] == sheet_id:
+                            col_count = s['properties'].get('gridProperties', {}).get('columnCount', 26)
+                            requests.append({"autoResizeDimensions": {"dimensions": {
+                                "sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": col_count
+                            }}})
+                            break
+                else:
+                    col_match = re.match(r'^([A-Za-z]+):([A-Za-z]+)$', columns)
+                    if col_match:
+                        requests.append({"autoResizeDimensions": {"dimensions": {
+                            "sheetId": sheet_id, "dimension": "COLUMNS",
+                            "startIndex": _col_to_index(col_match.group(1)),
+                            "endIndex": _col_to_index(col_match.group(2)) + 1
+                        }}})
+                    elif columns.isalpha():
+                        col_idx = _col_to_index(columns)
+                        requests.append({"autoResizeDimensions": {"dimensions": {
+                            "sheetId": sheet_id, "dimension": "COLUMNS",
+                            "startIndex": col_idx, "endIndex": col_idx + 1
+                        }}})
+            elif width:
+                # Set explicit width
+                if columns.lower() == "all":
+                    return {"error": "Cannot set explicit width for 'all' columns"}
+                col_match = re.match(r'^([A-Za-z]+):([A-Za-z]+)$', columns)
+                if col_match:
+                    start_idx, end_idx = _col_to_index(col_match.group(1)), _col_to_index(col_match.group(2)) + 1
+                else:
+                    start_idx = _col_to_index(columns)
+                    end_idx = start_idx + 1
+                requests.append({"updateDimensionProperties": {
+                    "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": start_idx, "endIndex": end_idx},
+                    "properties": {"pixelSize": width}, "fields": "pixelSize"
+                }})
+
+        if rows:
+            if auto and not height:
+                # Auto-resize rows
+                if rows.lower() == "all":
+                    spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+                    for s in spreadsheet['sheets']:
+                        if s['properties']['sheetId'] == sheet_id:
+                            row_count = s['properties'].get('gridProperties', {}).get('rowCount', 1000)
+                            requests.append({"autoResizeDimensions": {"dimensions": {
+                                "sheetId": sheet_id, "dimension": "ROWS", "startIndex": 0, "endIndex": row_count
+                            }}})
+                            break
+                else:
+                    row_match = re.match(r'^(\d+):(\d+)$', rows)
+                    if row_match:
+                        requests.append({"autoResizeDimensions": {"dimensions": {
+                            "sheetId": sheet_id, "dimension": "ROWS",
+                            "startIndex": int(row_match.group(1)) - 1,
+                            "endIndex": int(row_match.group(2))
+                        }}})
+            elif height:
+                # Set explicit height
+                row_match = re.match(r'^(\d+):(\d+)$', rows)
+                if row_match:
+                    start_idx, end_idx = int(row_match.group(1)) - 1, int(row_match.group(2))
+                else:
+                    start_idx = int(rows) - 1
+                    end_idx = start_idx + 1
+                requests.append({"updateDimensionProperties": {
+                    "range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": start_idx, "endIndex": end_idx},
+                    "properties": {"pixelSize": height}, "fields": "pixelSize"
+                }})
+
+        if not requests:
+            return {"error": "Specify columns and/or rows to resize"}
+
+        result = sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
+        return {'resized': {'columns': columns, 'rows': rows, 'width': width, 'height': height}}
+
+    # === FREEZE ===
+    elif action == "freeze":
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"updateSheetProperties": {
+                "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": freeze_rows, "frozenColumnCount": freeze_cols}},
+                "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"
+            }}]}
+        ).execute()
+        return {'frozen': {'rows': freeze_rows, 'columns': freeze_cols}}
+
+    # === ADD_ROWS ===
+    elif action == "add_rows":
+        start_idx = (int(start) - 1) if start else 0
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"insertDimension": {"range": {
+                "sheetId": sheet_id, "dimension": "ROWS", "startIndex": start_idx, "endIndex": start_idx + count
+            }, "inheritFromBefore": start_idx > 0}}]}
+        ).execute()
+        return {'added_rows': count, 'at_row': start_idx + 1}
+
+    # === ADD_COLS ===
+    elif action == "add_cols":
+        start_idx = _col_to_index(str(start)) if start else 0
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"insertDimension": {"range": {
+                "sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": start_idx, "endIndex": start_idx + count
+            }, "inheritFromBefore": start_idx > 0}}]}
+        ).execute()
+        return {'added_columns': count, 'at_column': _index_to_col(start_idx)}
+
+    # === DELETE_ROWS ===
+    elif action == "delete_rows":
+        start_idx = int(start) - 1 if start else 0
+        end_idx = int(end) if end else start_idx + count
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"deleteDimension": {"range": {
+                "sheetId": sheet_id, "dimension": "ROWS", "startIndex": start_idx, "endIndex": end_idx
+            }}}]}
+        ).execute()
+        return {'deleted_rows': f"{start_idx + 1}:{end_idx}"}
+
+    # === DELETE_COLS ===
+    elif action == "delete_cols":
+        start_idx = _col_to_index(str(start)) if start else 0
+        end_idx = _col_to_index(str(end)) + 1 if end else start_idx + count
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"deleteDimension": {"range": {
+                "sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": start_idx, "endIndex": end_idx
+            }}}]}
+        ).execute()
+        return {'deleted_columns': f"{_index_to_col(start_idx)}:{_index_to_col(end_idx - 1)}"}
+
+    # === TABLE (Convert to Native Google Sheets Table) ===
+    elif action == "table":
+        if not range:
+            return {"error": "range is required for table action"}
+
+        # Check if validation is a style name or custom table name
+        table_style = "table"  # default
+        table_name = None
+        if validation:
+            if validation.lower() in TABLE_STYLES and TABLE_STYLES[validation.lower()].get('native', False):
+                table_style = validation.lower()
+            else:
+                table_name = validation  # Use as custom table name
+
+        ts = TABLE_STYLES[table_style]
+
+        start_row, end_row, start_col, end_col = _parse_a1(range)
+        grid = {"sheetId": sheet_id, "startRowIndex": start_row, "endRowIndex": end_row,
+                "startColumnIndex": start_col, "endColumnIndex": end_col}
+
+        # Read header row to get column names
+        header_range = f"{sheet}!{_index_to_col(start_col)}{start_row + 1}:{_index_to_col(end_col - 1)}{start_row + 1}"
+        header_result = sheets_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=header_range
+        ).execute()
+        header_row = header_result.get('values', [[]])[0] if header_result.get('values') else []
+
+        # Build column properties from header row
+        num_cols = end_col - start_col if end_col else len(header_row)
+        column_properties = []
+        for i in range(num_cols):
+            col_name = header_row[i] if i < len(header_row) and header_row[i] else f"Column{i+1}"
+            column_properties.append({
+                "columnIndex": i,
+                "columnName": str(col_name)
+            })
+
+        # Generate table name
+        if not table_name:
+            table_name = f"Table_{sheet}_{int(time.time())}"
+
+        # Build table spec
+        table_spec = {
+            "name": table_name,
+            "range": grid,
+            "columnProperties": column_properties
+        }
+
+        # Add custom colors if specified in style
+        if 'header_color' in ts:
+            header_color = _parse_color(ts['header_color'])
+            band_color = ts.get('band_color', {"red": 1, "green": 1, "blue": 1})
+            table_spec["rowsProperties"] = {
+                "headerColorStyle": {"rgbColor": header_color},
+                "firstBandColorStyle": {"rgbColor": {"red": 1, "green": 1, "blue": 1}},
+                "secondBandColorStyle": {"rgbColor": band_color}
+            }
+
+        requests = []
+
+        # Add native table (like Format > Convert to Table)
+        requests.append({"addTable": {"table": table_spec}})
+
+        # Auto-resize
+        requests.append({"autoResizeDimensions": {"dimensions": {
+            "sheetId": sheet_id, "dimension": "COLUMNS",
+            "startIndex": start_col, "endIndex": end_col
+        }}})
+
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": requests}
+        ).execute()
+        return {'table_created': range, 'table_name': table_name, 'style': table_style, 'columns': len(column_properties)}
+
+    # === VALIDATE ===
+    elif action == "validate":
+        if not range:
+            return {"error": "range is required for validate action"}
+        if not validation:
+            return {"error": "validation type is required"}
+
+        rule = {"showCustomUi": True, "strict": not allow_invalid}
+
+        if validation == "dropdown":
+            if not options:
+                return {"error": "options are required for dropdown validation"}
+            rule["condition"] = {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": opt} for opt in options]}
+
+        elif validation == "checkbox":
+            rule["condition"] = {"type": "BOOLEAN"}
+
+        elif validation == "number":
+            if min_value is not None and max_value is not None:
+                rule["condition"] = {"type": "NUMBER_BETWEEN", "values": [
+                    {"userEnteredValue": str(min_value)}, {"userEnteredValue": str(max_value)}
+                ]}
+            elif min_value is not None:
+                rule["condition"] = {"type": "NUMBER_GREATER_THAN_EQ", "values": [{"userEnteredValue": str(min_value)}]}
+            elif max_value is not None:
+                rule["condition"] = {"type": "NUMBER_LESS_THAN_EQ", "values": [{"userEnteredValue": str(max_value)}]}
+            else:
+                rule["condition"] = {"type": "NUMBER_GREATER", "values": [{"userEnteredValue": "-999999999999"}]}
+
+        elif validation == "date":
+            rule["condition"] = {"type": "DATE_IS_VALID"}
+
+        elif validation == "custom":
+            if not custom_formula:
+                return {"error": "custom_formula is required for custom validation"}
+            rule["condition"] = {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": custom_formula}]}
+
+        else:
+            return {"error": f"Unknown validation type: {validation}"}
+
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"setDataValidation": {"range": _grid_range(sheet_id, range), "rule": rule}}]}
+        ).execute()
+        return {'validation_added': range, 'type': validation}
+
+    return {"error": f"Unknown action: {action}"}
+
+
+# =============================================================================
+# TOOL 4: sheets_visualize - Charts/Pivots/Sparklines
+# =============================================================================
+
+@mcp.tool()
+def sheets_visualize(
+    spreadsheet_id: str,
+    sheet: str,
+    action: str,
+    # Chart options
+    chart_type: Optional[str] = None,
+    data_range: Optional[str] = None,
+    title: Optional[str] = None,
+    position: Optional[str] = None,
+    width: int = 600,
+    height: int = 400,
+    style: Optional[str] = None,
+    # Pivot options
+    source_range: Optional[str] = None,
+    pivot_rows: Optional[List[str]] = None,
+    pivot_cols: Optional[List[str]] = None,
+    pivot_values: Optional[List[Dict[str, str]]] = None,
+    # Sparkline options
+    sparkline_type: Optional[str] = None,
+    sparkline_range: Optional[str] = None,
+    target_cell: Optional[str] = None,
+    ctx: Context = None
+) -> Dict[str, Any]:
+    """
+    Visualization operations for Google Sheets (Charts, Pivots, Sparklines).
+
+    Actions:
+        chart: Create a chart
+        pivot: Create a pivot table
+        sparkline: Insert sparkline formula into a cell
+
+    Chart types: line, bar, column, pie, area, scatter, combo, stacked_bar, stacked_column
+
+    Chart styles: default, minimal, presentation
+
+    Examples:
+        # Create a column chart
+        sheets_visualize(id, "Sheet1", "chart", chart_type="column", data_range="A1:E10", title="Sales by Region", position="G1")
+
+        # Create a pie chart
+        sheets_visualize(id, "Sheet1", "chart", chart_type="pie", data_range="A1:B5", title="Market Share", position="D1", style="minimal")
+
+        # Create a pivot table
+        sheets_visualize(id, "Sheet1", "pivot", source_range="A1:F100",
+                        pivot_rows=["Category"], pivot_cols=["Region"],
+                        pivot_values=[{"field": "Sales", "summarize": "SUM"}])
+
+        # Add sparkline
+        sheets_visualize(id, "Sheet1", "sparkline", sparkline_type="line", sparkline_range="B2:M2", target_cell="N2")
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    action = action.lower()
+
+    # === CHART ===
+    if action == "chart":
+        if not chart_type:
+            return {"error": "chart_type is required"}
+        if not data_range:
+            return {"error": "data_range is required"}
+
+        # Map chart types
+        chart_type_map = {
+            "line": "LINE",
+            "bar": "BAR",
+            "column": "COLUMN",
+            "pie": "PIE",
+            "area": "AREA",
+            "scatter": "SCATTER",
+            "combo": "COMBO",
+            "stacked_bar": "BAR",
+            "stacked_column": "COLUMN",
+        }
+        basic_chart_type = chart_type_map.get(chart_type.lower(), "COLUMN")
+
+        # Parse position
+        anchor_col, anchor_row = 0, 0
+        if position:
+            pos_match = re.match(r'^([A-Za-z]+)(\d+)$', position)
+            if pos_match:
+                anchor_col = _col_to_index(pos_match.group(1))
+                anchor_row = int(pos_match.group(2)) - 1
+
+        # Build source range
+        full_range = f"{sheet}!{data_range}"
+
+        # Basic chart spec
+        chart_spec = {
+            "title": title or "",
+            "basicChart": {
+                "chartType": basic_chart_type,
+                "legendPosition": "BOTTOM_LEGEND",
+                "domains": [{"domain": {"sourceRange": {"sources": [_grid_range(sheet_id, data_range)]}}}],
+                "series": [{"series": {"sourceRange": {"sources": [_grid_range(sheet_id, data_range)]}}}],
+            }
+        }
+
+        # Stacked options
+        if chart_type.lower() in ("stacked_bar", "stacked_column"):
+            chart_spec["basicChart"]["stackedType"] = "STACKED"
+
+        # Pie chart uses different structure
+        if chart_type.lower() == "pie":
+            chart_spec = {
+                "title": title or "",
+                "pieChart": {
+                    "legendPosition": "BOTTOM_LEGEND",
+                    "domain": {"sourceRange": {"sources": [_grid_range(sheet_id, data_range)]}},
+                    "series": {"sourceRange": {"sources": [_grid_range(sheet_id, data_range)]}},
+                }
+            }
+
+        # Apply style preset
+        if style and style.lower() in CHART_STYLES:
+            cs = CHART_STYLES[style.lower()]
+            if "legend_position" in cs:
+                if "basicChart" in chart_spec:
+                    chart_spec["basicChart"]["legendPosition"] = cs["legend_position"]
+                elif "pieChart" in chart_spec:
+                    chart_spec["pieChart"]["legendPosition"] = cs["legend_position"]
+
+        request = {
+            "addChart": {
+                "chart": {
+                    "spec": chart_spec,
+                    "position": {
+                        "overlayPosition": {
+                            "anchorCell": {"sheetId": sheet_id, "rowIndex": anchor_row, "columnIndex": anchor_col},
+                            "widthPixels": width,
+                            "heightPixels": height
+                        }
+                    }
+                }
+            }
+        }
+
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [request]}
+        ).execute()
+
+        chart_id = result.get('replies', [{}])[0].get('addChart', {}).get('chart', {}).get('chartId')
+        return {'chart_created': True, 'chart_id': chart_id, 'type': chart_type, 'position': position}
+
+    # === PIVOT ===
+    elif action == "pivot":
+        if not source_range:
+            return {"error": "source_range is required for pivot"}
+
+        # Get headers from source range to map field names to indices
+        full_source = f"{sheet}!{source_range}"
+        result = sheets_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=full_source
+        ).execute()
+        headers = result.get('values', [[]])[0]
+        header_map = {h.lower(): i for i, h in enumerate(headers)}
+
+        # Build pivot table definition
+        pivot_def = {
+            "source": {"sheetId": sheet_id, **_grid_range(sheet_id, source_range)},
+            "rows": [],
+            "columns": [],
+            "values": []
+        }
+
+        # Add row groups
+        if pivot_rows:
+            for field in pivot_rows:
+                idx = header_map.get(field.lower(), 0)
+                pivot_def["rows"].append({
+                    "sourceColumnOffset": idx,
+                    "showTotals": True,
+                    "sortOrder": "ASCENDING"
+                })
+
+        # Add column groups
+        if pivot_cols:
+            for field in pivot_cols:
+                idx = header_map.get(field.lower(), 0)
+                pivot_def["columns"].append({
+                    "sourceColumnOffset": idx,
+                    "showTotals": True,
+                    "sortOrder": "ASCENDING"
+                })
+
+        # Add values
+        if pivot_values:
+            summarize_map = {
+                "sum": "SUM", "count": "COUNTA", "average": "AVERAGE",
+                "max": "MAX", "min": "MIN", "countunique": "COUNTUNIQUE"
+            }
+            for v in pivot_values:
+                field = v.get('field', '')
+                summarize = v.get('summarize', 'SUM').upper()
+                idx = header_map.get(field.lower(), 0)
+                pivot_def["values"].append({
+                    "sourceColumnOffset": idx,
+                    "summarizeFunction": summarize_map.get(summarize.lower(), "SUM")
+                })
+
+        # Create new sheet for pivot
+        pivot_sheet_name = f"Pivot_{sheet}"
+        try:
+            add_result = sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": [{"addSheet": {"properties": {"title": pivot_sheet_name}}}]}
+            ).execute()
+            pivot_sheet_id = add_result['replies'][0]['addSheet']['properties']['sheetId']
+        except:
+            # Sheet might already exist
+            pivot_sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, pivot_sheet_name)
+
+        # Create pivot table
+        request = {
+            "updateCells": {
+                "rows": [{"values": [{"pivotTable": pivot_def}]}],
+                "start": {"sheetId": pivot_sheet_id, "rowIndex": 0, "columnIndex": 0},
+                "fields": "pivotTable"
+            }
+        }
+
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [request]}
+        ).execute()
+
+        return {'pivot_created': True, 'pivot_sheet': pivot_sheet_name, 'source': source_range}
+
+    # === SPARKLINE ===
+    elif action == "sparkline":
+        if not sparkline_range:
+            return {"error": "sparkline_range is required"}
+        if not target_cell:
+            return {"error": "target_cell is required"}
+
+        sparkline_type = (sparkline_type or "line").lower()
+        type_map = {"line": "line", "bar": "bar", "column": "column", "winloss": "winloss"}
+        sl_type = type_map.get(sparkline_type, "line")
+
+        # Build sparkline formula
+        full_range = f"{sheet}!{sparkline_range}"
+        if sl_type == "line":
+            formula = f'=SPARKLINE({full_range})'
+        else:
+            formula = f'=SPARKLINE({full_range}, {{"charttype", "{sl_type}"}})'
+
+        # Write formula to target cell
+        target_full = f"{sheet}!{target_cell}"
+        result = sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=target_full,
+            valueInputOption='USER_ENTERED', body={'values': [[formula]]}
+        ).execute()
+
+        return {'sparkline_created': True, 'target': target_cell, 'type': sl_type, 'formula': formula}
+
+    return {"error": f"Unknown action: {action}"}
+
+
+# =============================================================================
+# TOOL 5: sheets_manage - Sheet Tab Operations
+# =============================================================================
+
+@mcp.tool()
+def sheets_manage(
+    spreadsheet_id: str,
+    action: str,
+    sheet: Optional[str] = None,
+    new_name: Optional[str] = None,
+    destination_spreadsheet: Optional[str] = None,
+    rows: int = 1000,
+    cols: int = 26,
+    tab_color: Optional[str] = None,
+    ctx: Context = None
+) -> Dict[str, Any]:
+    """
+    Sheet tab management operations.
+
+    Actions:
+        list: List all sheet tabs in the spreadsheet
+        create: Create a new sheet tab
+        rename: Rename an existing sheet tab
+        copy: Copy a sheet to same or different spreadsheet
+        delete: Delete a sheet tab
+        duplicate: Duplicate a sheet within the same spreadsheet
+
+    Examples:
+        # List all sheets
+        sheets_manage(id, "list")
+
+        # Create new sheet
+        sheets_manage(id, "create", sheet="Sales Data", rows=500, cols=20, tab_color="blue")
+
+        # Rename sheet
+        sheets_manage(id, "rename", sheet="Sheet1", new_name="Raw Data")
+
+        # Copy to another spreadsheet
+        sheets_manage(id, "copy", sheet="Sales", destination_spreadsheet="other_id", new_name="Sales Backup")
+
+        # Delete sheet
+        sheets_manage(id, "delete", sheet="Temp")
+
+        # Duplicate sheet
+        sheets_manage(id, "duplicate", sheet="Template", new_name="January")
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    action = action.lower()
+
+    # === LIST ===
+    if action == "list":
+        spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        sheets_list = []
+        for s in spreadsheet['sheets']:
+            props = s['properties']
+            sheets_list.append({
+                'title': props['title'],
+                'sheet_id': props['sheetId'],
+                'index': props['index'],
+                'row_count': props.get('gridProperties', {}).get('rowCount'),
+                'column_count': props.get('gridProperties', {}).get('columnCount')
+            })
+        return {'sheets': sheets_list, 'count': len(sheets_list)}
+
+    # === CREATE ===
+    elif action == "create":
+        if not sheet:
+            return {"error": "sheet name is required for create action"}
+
+        props = {"title": sheet, "gridProperties": {"rowCount": rows, "columnCount": cols}}
+        if tab_color:
+            props["tabColor"] = _parse_color(tab_color)
+
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": props}}]}
+        ).execute()
+        new_props = result['replies'][0]['addSheet']['properties']
+        return {'created': sheet, 'sheet_id': new_props['sheetId']}
+
+    # === RENAME ===
+    elif action == "rename":
+        if not sheet or not new_name:
+            return {"error": "sheet and new_name are required for rename action"}
+
         sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
         result = sheets_service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
-            body={"requests": [{
-                "repeatCell": {
-                    "range": _grid_range(sheet_id, range),
-                    "cell": {"userEnteredFormat": {}},
-                    "fields": "userEnteredFormat"
-                }
-            }]}
-        ).execute()
-        results['formatting_cleared'] = result
-
-    return results
-
-
-@mcp.tool()
-def find_and_replace(spreadsheet_id: str, sheet: str, find: str, replace: str,
-                     match_case: bool = False, match_entire_cell: bool = False,
-                     use_regex: bool = False, ctx: Context = None) -> Dict[str, Any]:
-    """
-    Find and replace text across a sheet.
-
-    Args:
-        spreadsheet_id: The spreadsheet ID
-        sheet: Sheet name (e.g., "Sheet1") or "*" for all sheets
-        find: Text to find
-        replace: Text to replace with
-        match_case: Match case exactly (default: False)
-        match_entire_cell: Only match if entire cell equals find text (default: False)
-        use_regex: Treat find as regular expression (default: False)
-
-    Example:
-        find_and_replace(id, "Sheet1", "🆕 NEW", "")  # Remove emoji status
-        find_and_replace(id, "Sheet1", "TODO", "DONE", match_case=True)
-        find_and_replace(id, "*", "old_name", "new_name")  # All sheets
-
-    Returns: {occurrences_changed: N, sheets_changed: N}
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-
-    request = {
-        "findReplace": {
-            "find": find,
-            "replacement": replace,
-            "matchCase": match_case,
-            "matchEntireCell": match_entire_cell,
-            "searchByRegex": use_regex
-        }
-    }
-
-    # If specific sheet, limit scope
-    if sheet != "*":
-        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
-        request["findReplace"]["sheetId"] = sheet_id
-    else:
-        request["findReplace"]["allSheets"] = True
-
-    result = sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [request]}
-    ).execute()
-
-    # Extract find/replace result
-    replies = result.get('replies', [])
-    if replies and 'findReplace' in replies[0]:
-        fr = replies[0]['findReplace']
-        return {
-            'occurrences_changed': fr.get('occurrencesChanged', 0),
-            'values_changed': fr.get('valuesChanged', 0),
-            'formulas_changed': fr.get('formulasChanged', 0),
-            'rows_changed': fr.get('rowsChanged', 0),
-            'sheets_changed': fr.get('sheetsChanged', 0)
-        }
-
-    return {'occurrences_changed': 0, 'result': result}
-
-
-@mcp.tool()
-def append_columns(spreadsheet_id: str, sheet: str, headers: List[str],
-                   data: Optional[List[List[Any]]] = None,
-                   start_row: int = 1, ctx: Context = None) -> Dict[str, Any]:
-    """
-    Append new columns to the right of existing data.
-
-    Args:
-        spreadsheet_id: The spreadsheet ID
-        sheet: Sheet name (e.g., "Sheet1")
-        headers: List of column headers to add
-        data: Optional 2D array of data for the new columns (rows should match existing data)
-        start_row: Row where headers start (default: 1, meaning row 1)
-
-    Example:
-        # Add single column with header only
-        append_columns(id, "Sheet1", ["New Column"])
-
-        # Add multiple columns with data
-        append_columns(id, "Sheet1",
-            headers=["Status", "Notes"],
-            data=[["Active", "First note"], ["Inactive", "Second note"]]
-        )
-
-    Returns: {start_column: "F", columns_added: N, range_updated: "F1:G10"}
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-
-    # Get current data to find the last column
-    result = sheets_service.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id,
-        range=f"{sheet}!{start_row}:{start_row}"
-    ).execute()
-
-    existing_row = result.get('values', [[]])[0]
-    start_col_idx = len(existing_row)
-
-    # Convert column index to letter
-    def idx_to_col(idx: int) -> str:
-        col = ''
-        while idx >= 0:
-            col = chr(65 + idx % 26) + col
-            idx = idx // 26 - 1
-        return col
-
-    start_col = idx_to_col(start_col_idx)
-
-    # Prepare data to write: headers + data rows
-    values_to_write = [headers]
-    if data:
-        values_to_write.extend(data)
-
-    # Calculate end column
-    end_col_idx = start_col_idx + len(headers) - 1
-    end_col = idx_to_col(end_col_idx)
-    end_row = start_row + len(values_to_write) - 1
-
-    write_range = f"{sheet}!{start_col}{start_row}:{end_col}{end_row}"
-
-    # Write the new columns
-    write_result = sheets_service.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id,
-        range=write_range,
-        valueInputOption='USER_ENTERED',
-        body={'values': values_to_write}
-    ).execute()
-
-    return {
-        'start_column': start_col,
-        'end_column': end_col,
-        'columns_added': len(headers),
-        'rows_written': len(values_to_write),
-        'range_updated': write_range,
-        'result': write_result
-    }
-
-
-@mcp.tool()
-def delete_sheet(spreadsheet_id: str, sheet: str, ctx: Context = None) -> Dict[str, Any]:
-    """
-    Delete a sheet tab from a spreadsheet.
-
-    Args:
-        spreadsheet_id: The spreadsheet ID
-        sheet: Sheet name to delete
-
-    Returns: Confirmation of deletion
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
-
-    result = sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"deleteSheet": {"sheetId": sheet_id}}]}
-    ).execute()
-
-    return {'deleted': sheet, 'sheet_id': sheet_id, 'result': result}
-
-
-# =============================================================================
-# QUERY/FILTER OPERATIONS
-# =============================================================================
-
-@mcp.tool()
-def filter_rows(spreadsheet_id: str, sheet: str, column: str, operator: str, value: str,
-                range: Optional[str] = None, include_header: bool = True, ctx: Context = None) -> Dict[str, Any]:
-    """
-    Filter rows by column value.
-
-    column: Column letter (A, B, C...) or header name to filter on
-    operator: equals, not_equals, contains, not_contains, starts_with, ends_with, gt, gte, lt, lte, empty, not_empty, regex
-    value: Value to compare against (ignored for empty/not_empty)
-    range: Optional A1 range to filter within (default: entire sheet)
-    include_header: Include header row in results (default: True)
-
-    Returns: {filtered_rows: [[...]], total_rows: N, matched_rows: N, column_index: N}
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    full_range = f"{sheet}!{range}" if range else sheet
-
-    result = sheets_service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=full_range).execute()
-    rows = result.get('values', [])
-
-    if not rows:
-        return {'filtered_rows': [], 'total_rows': 0, 'matched_rows': 0, 'column_index': -1}
-
-    # Determine column index - either by letter or by header name
-    header = rows[0] if rows else []
-    col_idx = -1
-
-    if len(column) <= 2 and column.isalpha():
-        col_idx = _col_to_index(column.upper())
-    else:
-        # Try to find by header name (case-insensitive)
-        for i, h in enumerate(header):
-            if str(h).lower() == column.lower():
-                col_idx = i
-                break
-
-    if col_idx == -1:
-        return {'error': f'Column "{column}" not found', 'filtered_rows': [], 'total_rows': len(rows), 'matched_rows': 0, 'column_index': -1}
-
-    def matches(cell_value: str) -> bool:
-        cell_str = str(cell_value).strip() if cell_value else ''
-        val = str(value).strip() if value else ''
-        cell_lower = cell_str.lower()
-        val_lower = val.lower()
-
-        if operator == 'equals':
-            return cell_lower == val_lower
-        elif operator == 'not_equals':
-            return cell_lower != val_lower
-        elif operator == 'contains':
-            return val_lower in cell_lower
-        elif operator == 'not_contains':
-            return val_lower not in cell_lower
-        elif operator == 'starts_with':
-            return cell_lower.startswith(val_lower)
-        elif operator == 'ends_with':
-            return cell_lower.endswith(val_lower)
-        elif operator == 'empty':
-            return cell_str == ''
-        elif operator == 'not_empty':
-            return cell_str != ''
-        elif operator == 'regex':
-            import re
-            return bool(re.search(val, cell_str, re.IGNORECASE))
-        elif operator in ('gt', 'gte', 'lt', 'lte'):
-            try:
-                cell_num = float(cell_str.replace(',', ''))
-                val_num = float(val.replace(',', ''))
-                if operator == 'gt':
-                    return cell_num > val_num
-                elif operator == 'gte':
-                    return cell_num >= val_num
-                elif operator == 'lt':
-                    return cell_num < val_num
-                elif operator == 'lte':
-                    return cell_num <= val_num
-            except (ValueError, TypeError):
-                return False
-        return False
-
-    # Filter rows (skip header for matching, but include in output if requested)
-    filtered = []
-    if include_header and rows:
-        filtered.append(rows[0])
-
-    data_rows = rows[1:] if rows else []
-    for row in data_rows:
-        cell_val = row[col_idx] if col_idx < len(row) else ''
-        if matches(cell_val):
-            filtered.append(row)
-
-    matched_count = len(filtered) - (1 if include_header and filtered else 0)
-    return {
-        'filtered_rows': filtered,
-        'total_rows': len(rows),
-        'matched_rows': matched_count,
-        'column_index': col_idx
-    }
-
-
-@mcp.tool()
-def search_cells(spreadsheet_id: str, sheet: str, search_term: str,
-                 case_sensitive: bool = False, range: Optional[str] = None,
-                 max_results: int = 100, ctx: Context = None) -> Dict[str, Any]:
-    """
-    Search for cells containing text.
-
-    search_term: Text to search for
-    case_sensitive: Match case exactly (default: False)
-    range: Optional A1 range to search within
-    max_results: Maximum number of matches to return (default: 100)
-
-    Returns: {matches: [{row: N, column: "A", cell: "A1", value: "..."}], total_matches: N}
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    full_range = f"{sheet}!{range}" if range else sheet
-
-    result = sheets_service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=full_range).execute()
-    rows = result.get('values', [])
-
-    matches = []
-    search = search_term if case_sensitive else search_term.lower()
-
-    for row_idx, row in enumerate(rows):
-        for col_idx, cell in enumerate(row):
-            cell_str = str(cell) if cell else ''
-            compare_str = cell_str if case_sensitive else cell_str.lower()
-
-            if search in compare_str:
-                col_letter = ''
-                idx = col_idx
-                while idx >= 0:
-                    col_letter = chr(65 + idx % 26) + col_letter
-                    idx = idx // 26 - 1
-
-                matches.append({
-                    'row': row_idx + 1,
-                    'column': col_letter,
-                    'cell': f"{col_letter}{row_idx + 1}",
-                    'value': cell_str
-                })
-
-                if len(matches) >= max_results:
-                    return {'matches': matches, 'total_matches': len(matches), 'truncated': True}
-
-    return {'matches': matches, 'total_matches': len(matches), 'truncated': False}
-
-
-@mcp.tool()
-def query_rows(spreadsheet_id: str, sheet: str, filters: List[Dict[str, str]],
-               match_all: bool = True, range: Optional[str] = None,
-               include_header: bool = True, ctx: Context = None) -> Dict[str, Any]:
-    """
-    Query rows with multiple filter conditions.
-
-    filters: List of filter conditions, each with {column, operator, value}
-             Example: [{"column": "A", "operator": "contains", "value": "DIM_"},
-                       {"column": "B", "operator": "gt", "value": "100"}]
-    match_all: If True, all conditions must match (AND). If False, any condition matches (OR).
-    range: Optional A1 range to query within
-    include_header: Include header row in results
-
-    Supported operators: equals, not_equals, contains, not_contains, starts_with, ends_with,
-                         gt, gte, lt, lte, empty, not_empty, regex
-
-    Returns: {filtered_rows: [[...]], total_rows: N, matched_rows: N}
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    full_range = f"{sheet}!{range}" if range else sheet
-
-    result = sheets_service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=full_range).execute()
-    rows = result.get('values', [])
-
-    if not rows:
-        return {'filtered_rows': [], 'total_rows': 0, 'matched_rows': 0}
-
-    header = rows[0] if rows else []
-
-    # Resolve column indices for all filters
-    resolved_filters = []
-    for f in filters:
-        col = f.get('column', '')
-        col_idx = -1
-
-        if len(col) <= 2 and col.isalpha():
-            col_idx = _col_to_index(col.upper())
-        else:
-            for i, h in enumerate(header):
-                if str(h).lower() == col.lower():
-                    col_idx = i
-                    break
-
-        if col_idx == -1:
-            return {'error': f'Column "{col}" not found', 'filtered_rows': [], 'total_rows': len(rows), 'matched_rows': 0}
-
-        resolved_filters.append({
-            'col_idx': col_idx,
-            'operator': f.get('operator', 'equals'),
-            'value': f.get('value', '')
-        })
-
-    def check_condition(row: List, flt: Dict) -> bool:
-        col_idx = flt['col_idx']
-        operator = flt['operator']
-        value = flt['value']
-
-        cell_val = row[col_idx] if col_idx < len(row) else ''
-        cell_str = str(cell_val).strip() if cell_val else ''
-        val = str(value).strip() if value else ''
-        cell_lower = cell_str.lower()
-        val_lower = val.lower()
-
-        if operator == 'equals':
-            return cell_lower == val_lower
-        elif operator == 'not_equals':
-            return cell_lower != val_lower
-        elif operator == 'contains':
-            return val_lower in cell_lower
-        elif operator == 'not_contains':
-            return val_lower not in cell_lower
-        elif operator == 'starts_with':
-            return cell_lower.startswith(val_lower)
-        elif operator == 'ends_with':
-            return cell_lower.endswith(val_lower)
-        elif operator == 'empty':
-            return cell_str == ''
-        elif operator == 'not_empty':
-            return cell_str != ''
-        elif operator == 'regex':
-            import re
-            return bool(re.search(val, cell_str, re.IGNORECASE))
-        elif operator in ('gt', 'gte', 'lt', 'lte'):
-            try:
-                cell_num = float(cell_str.replace(',', ''))
-                val_num = float(val.replace(',', ''))
-                if operator == 'gt':
-                    return cell_num > val_num
-                elif operator == 'gte':
-                    return cell_num >= val_num
-                elif operator == 'lt':
-                    return cell_num < val_num
-                elif operator == 'lte':
-                    return cell_num <= val_num
-            except (ValueError, TypeError):
-                return False
-        return False
-
-    def row_matches(row: List) -> bool:
-        if match_all:
-            return all(check_condition(row, f) for f in resolved_filters)
-        else:
-            return any(check_condition(row, f) for f in resolved_filters)
-
-    filtered = []
-    if include_header and rows:
-        filtered.append(rows[0])
-
-    data_rows = rows[1:] if rows else []
-    for row in data_rows:
-        if row_matches(row):
-            filtered.append(row)
-
-    matched_count = len(filtered) - (1 if include_header and filtered else 0)
-    return {
-        'filtered_rows': filtered,
-        'total_rows': len(rows),
-        'matched_rows': matched_count
-    }
-
-
-# =============================================================================
-# SHEET/SPREADSHEET MANAGEMENT (ORIGINAL, PRESERVED)
-# =============================================================================
-
-@mcp.tool()
-def list_sheets(spreadsheet_id: str, ctx: Context = None) -> List[str]:
-    """List all sheet names in a spreadsheet."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-    return [s['properties']['title'] for s in spreadsheet['sheets']]
-
-
-@mcp.tool()
-def copy_sheet(src_spreadsheet: str, src_sheet: str, dst_spreadsheet: str, dst_sheet: str, ctx: Context = None) -> Dict[str, Any]:
-    """Copy a sheet to another spreadsheet."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    src_sheet_id = _get_sheet_id(sheets_service, src_spreadsheet, src_sheet)
-
-    copy_result = sheets_service.spreadsheets().sheets().copyTo(
-        spreadsheetId=src_spreadsheet, sheetId=src_sheet_id,
-        body={"destinationSpreadsheetId": dst_spreadsheet}
-    ).execute()
-
-    if copy_result.get('title') != dst_sheet:
-        sheets_service.spreadsheets().batchUpdate(
-            spreadsheetId=dst_spreadsheet,
             body={"requests": [{"updateSheetProperties": {
-                "properties": {"sheetId": copy_result['sheetId'], "title": dst_sheet}, "fields": "title"
+                "properties": {"sheetId": sheet_id, "title": new_name}, "fields": "title"
             }}]}
         ).execute()
+        return {'renamed': sheet, 'new_name': new_name}
 
-    return copy_result
+    # === COPY ===
+    elif action == "copy":
+        if not sheet:
+            return {"error": "sheet name is required for copy action"}
 
+        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+        dest_id = destination_spreadsheet or spreadsheet_id
 
-@mcp.tool()
-def rename_sheet(spreadsheet: str, sheet: str, new_name: str, ctx: Context = None) -> Dict[str, Any]:
-    """Rename a sheet."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    sheet_id = _get_sheet_id(sheets_service, spreadsheet, sheet)
+        copy_result = sheets_service.spreadsheets().sheets().copyTo(
+            spreadsheetId=spreadsheet_id, sheetId=sheet_id,
+            body={"destinationSpreadsheetId": dest_id}
+        ).execute()
 
-    return sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet,
-        body={"requests": [{"updateSheetProperties": {
-            "properties": {"sheetId": sheet_id, "title": new_name}, "fields": "title"
-        }}]}
-    ).execute()
-
-
-@mcp.tool()
-def get_multiple_sheet_data(queries: List[Dict[str, str]], ctx: Context = None) -> List[Dict[str, Any]]:
-    """Get data from multiple ranges. queries: [{"spreadsheet_id": "x", "sheet": "y", "range": "A1:B5"}, ...]"""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    results = []
-
-    for q in queries:
-        try:
-            if not all([q.get('spreadsheet_id'), q.get('sheet'), q.get('range')]):
-                results.append({**q, 'error': 'Missing spreadsheet_id, sheet, or range'})
-                continue
-            result = sheets_service.spreadsheets().values().get(
-                spreadsheetId=q['spreadsheet_id'], range=f"{q['sheet']}!{q['range']}"
+        # Rename if new_name provided
+        if new_name and copy_result.get('title') != new_name:
+            sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=dest_id,
+                body={"requests": [{"updateSheetProperties": {
+                    "properties": {"sheetId": copy_result['sheetId'], "title": new_name}, "fields": "title"
+                }}]}
             ).execute()
-            results.append({**q, 'data': result.get('values', [])})
-        except Exception as e:
-            results.append({**q, 'error': str(e)})
+            copy_result['title'] = new_name
 
-    return results
+        return {'copied': sheet, 'destination': dest_id, 'new_sheet_id': copy_result['sheetId'], 'new_title': copy_result.get('title', new_name)}
+
+    # === DELETE ===
+    elif action == "delete":
+        if not sheet:
+            return {"error": "sheet name is required for delete action"}
+
+        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"deleteSheet": {"sheetId": sheet_id}}]}
+        ).execute()
+        return {'deleted': sheet, 'sheet_id': sheet_id}
+
+    # === DUPLICATE ===
+    elif action == "duplicate":
+        if not sheet:
+            return {"error": "sheet name is required for duplicate action"}
+
+        sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+        dup_name = new_name or f"{sheet} (Copy)"
+
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"duplicateSheet": {
+                "sourceSheetId": sheet_id,
+                "newSheetName": dup_name
+            }}]}
+        ).execute()
+        new_props = result['replies'][0]['duplicateSheet']['properties']
+        return {'duplicated': sheet, 'new_sheet': dup_name, 'new_sheet_id': new_props['sheetId']}
+
+    return {"error": f"Unknown action: {action}"}
+
+
+# =============================================================================
+# TOOL 6: drive - Spreadsheet & Folder Operations
+# =============================================================================
+
+@mcp.tool()
+def drive(
+    action: str,
+    spreadsheet_id: Optional[str] = None,
+    title: Optional[str] = None,
+    folder_id: Optional[str] = None,
+    recipients: Optional[List[Dict[str, str]]] = None,
+    spreadsheet_ids: Optional[List[str]] = None,
+    preview_rows: int = 5,
+    ctx: Context = None
+) -> Dict[str, Any]:
+    """
+    Google Drive operations for spreadsheets.
+
+    Actions:
+        create: Create a new spreadsheet
+        list: List spreadsheets in a folder
+        share: Share a spreadsheet with users
+        folders: List folders in Drive
+        info: Get spreadsheet metadata
+        summary: Get summary of multiple spreadsheets (headers, preview rows)
+
+    Examples:
+        # Create new spreadsheet
+        drive("create", title="Sales Report 2024", folder_id="folder_id_here")
+
+        # List spreadsheets in folder
+        drive("list", folder_id="folder_id")
+
+        # Share spreadsheet
+        drive("share", spreadsheet_id="xxx", recipients=[{"email": "user@example.com", "role": "writer"}])
+
+        # List folders
+        drive("folders", folder_id="parent_folder_id")
+
+        # Get spreadsheet info
+        drive("info", spreadsheet_id="xxx")
+
+        # Get summary of multiple spreadsheets
+        drive("summary", spreadsheet_ids=["id1", "id2"], preview_rows=3)
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    drive_service = ctx.request_context.lifespan_context.drive_service
+    default_folder = ctx.request_context.lifespan_context.folder_id
+    action = action.lower()
+
+    # === CREATE ===
+    if action == "create":
+        if not title:
+            return {"error": "title is required for create action"}
+
+        target_folder = folder_id or default_folder
+        body = {'name': title, 'mimeType': 'application/vnd.google-apps.spreadsheet'}
+        if target_folder:
+            body['parents'] = [target_folder]
+
+        result = drive_service.files().create(supportsAllDrives=True, body=body, fields='id, name, parents').execute()
+        return {'spreadsheet_id': result['id'], 'title': result['name'], 'folder': result.get('parents', ['root'])[0]}
+
+    # === LIST ===
+    elif action == "list":
+        target_folder = folder_id or default_folder
+        query = "mimeType='application/vnd.google-apps.spreadsheet'"
+        if target_folder:
+            query += f" and '{target_folder}' in parents"
+
+        result = drive_service.files().list(
+            q=query, spaces='drive', includeItemsFromAllDrives=True, supportsAllDrives=True,
+            fields='files(id, name, modifiedTime)', orderBy='modifiedTime desc'
+        ).execute()
+
+        return {'spreadsheets': [{'id': f['id'], 'title': f['name'], 'modified': f.get('modifiedTime')} for f in result.get('files', [])]}
+
+    # === SHARE ===
+    elif action == "share":
+        if not spreadsheet_id:
+            return {"error": "spreadsheet_id is required for share action"}
+        if not recipients:
+            return {"error": "recipients are required for share action"}
+
+        successes, failures = [], []
+        for r in recipients:
+            email, role = r.get('email'), r.get('role', 'writer')
+            if not email:
+                failures.append({'email': None, 'error': 'Missing email'})
+                continue
+            if role not in ['reader', 'commenter', 'writer']:
+                failures.append({'email': email, 'error': f"Invalid role: {role}"})
+                continue
+            try:
+                result = drive_service.permissions().create(
+                    fileId=spreadsheet_id, body={'type': 'user', 'role': role, 'emailAddress': email},
+                    sendNotificationEmail=True, fields='id'
+                ).execute()
+                successes.append({'email': email, 'role': role, 'permission_id': result['id']})
+            except Exception as e:
+                failures.append({'email': email, 'error': str(e)})
+
+        return {"shared": successes, "failed": failures}
+
+    # === FOLDERS ===
+    elif action == "folders":
+        parent = folder_id or 'root'
+        query = f"mimeType='application/vnd.google-apps.folder' and '{parent}' in parents"
+
+        result = drive_service.files().list(
+            q=query, spaces='drive', includeItemsFromAllDrives=True, supportsAllDrives=True,
+            fields='files(id, name)', orderBy='name'
+        ).execute()
+
+        return {'folders': [{'id': f['id'], 'name': f['name']} for f in result.get('files', [])]}
+
+    # === INFO ===
+    elif action == "info":
+        if not spreadsheet_id:
+            return {"error": "spreadsheet_id is required for info action"}
+
+        spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        props = spreadsheet.get('properties', {})
+        sheets_list = [{'title': s['properties']['title'], 'sheet_id': s['properties']['sheetId']}
+                       for s in spreadsheet.get('sheets', [])]
+
+        return {
+            'spreadsheet_id': spreadsheet_id,
+            'title': props.get('title'),
+            'locale': props.get('locale'),
+            'time_zone': props.get('timeZone'),
+            'sheets': sheets_list
+        }
+
+    # === SUMMARY ===
+    elif action == "summary":
+        if not spreadsheet_ids:
+            return {"error": "spreadsheet_ids are required for summary action"}
+
+        summaries = []
+        for sid in spreadsheet_ids:
+            summary = {'spreadsheet_id': sid, 'title': None, 'sheets': [], 'error': None}
+            try:
+                ss = sheets_service.spreadsheets().get(spreadsheetId=sid, fields='properties.title,sheets(properties(title,sheetId))').execute()
+                summary['title'] = ss.get('properties', {}).get('title', 'Unknown')
+
+                for s in ss.get('sheets', []):
+                    sheet_title = s.get('properties', {}).get('title')
+                    sheet_summary = {'title': sheet_title, 'headers': [], 'preview': [], 'error': None}
+                    try:
+                        result = sheets_service.spreadsheets().values().get(
+                            spreadsheetId=sid, range=f"{sheet_title}!1:{preview_rows + 1}"
+                        ).execute()
+                        values = result.get('values', [])
+                        if values:
+                            sheet_summary['headers'] = values[0]
+                            sheet_summary['preview'] = values[1:] if len(values) > 1 else []
+                    except Exception as e:
+                        sheet_summary['error'] = str(e)
+                    summary['sheets'].append(sheet_summary)
+            except Exception as e:
+                summary['error'] = str(e)
+            summaries.append(summary)
+
+        return {'summaries': summaries}
+
+    return {"error": f"Unknown action: {action}"}
+
+
+# =============================================================================
+# UTILITY TOOLS
+# =============================================================================
+
+@mcp.tool()
+def get_presets(ctx: Context = None) -> Dict[str, Any]:
+    """
+    Get all available presets for styles, table formats, number formats, and colors.
+
+    Returns dictionaries of:
+    - styles: Text/cell style presets (h1, h2, header, bold, success, error, etc.)
+    - table_styles: "table" = native Google Sheets Table, "basic*" = styled ranges (no auto-expand/filters)
+    - number_formats: Number format patterns (currency, percent, date, etc.)
+    - colors: Named colors available for use
+    - chart_styles: Chart style presets
+    """
+    # "table" = native Google Sheets Table (Format > Convert to Table)
+    # "basic*" = styled ranges with manual formatting (not real tables)
+    native_tables = [k for k, v in TABLE_STYLES.items() if v.get('native', False)]
+    styled_ranges = [k for k, v in TABLE_STYLES.items() if not v.get('native', False)]
+
+    return {
+        'styles': list(STYLES.keys()),
+        'table_styles': {'native_table': native_tables, 'styled_ranges': styled_ranges},
+        'number_formats': NUMBER_FORMATS,
+        'colors': list(COLORS.keys()),
+        'chart_styles': list(CHART_STYLES.keys())
+    }
 
 
 @mcp.tool()
-def get_multiple_spreadsheet_summary(spreadsheet_ids: List[str], rows_to_fetch: int = 5, ctx: Context = None) -> List[Dict[str, Any]]:
-    """Get summary of multiple spreadsheets (sheet names, headers, first rows)."""
+def ascii_diagram(
+    action: str,
+    text: Optional[str] = None,
+    lines: Optional[List[str]] = None,
+    width: int = 77,
+    elements: Optional[List[Dict[str, Any]]] = None,
+    ctx: Context = None
+) -> Dict[str, Any]:
+    """
+    Build ASCII diagrams programmatically with proper alignment.
+
+    Actions:
+        box: Create a box with centered text
+        title: Create a title bar (single-line box)
+        comment: Create a comment annotation (◄── text)
+        arrow: Create an arrow (direction: right, left, down, up)
+        diagram: Build full diagram from elements list
+
+    Args:
+        text: Text content for box/title/comment
+        lines: Multiple lines for box content
+        width: Total width (default 77, good for sheets)
+        elements: List of element dicts for "diagram" action
+
+    Element types for "diagram" action:
+        {"type": "title", "text": "TITLE TEXT"}
+        {"type": "box", "text": "Content"} or {"type": "box", "lines": ["Line1", "Line2"]}
+        {"type": "box", "text": "Content", "x": 4, "comment": "◄── Note"}
+        {"type": "text", "text": "Raw line", "x": 10}
+        {"type": "arrow", "direction": "down", "x": 20}
+        {"type": "spacer"}
+
+    Examples:
+        # Create a title box
+        ascii_diagram("title", text="SYSTEM ARCHITECTURE", width=60)
+        # Returns: ["┌──────────...──────────┐", "│  SYSTEM ARCHITECTURE  │", "└──────...┘"]
+
+        # Create a content box
+        ascii_diagram("box", lines=["Client", "(Web)"], width=14)
+
+        # Create a comment
+        ascii_diagram("comment", text="Data Layer")
+        # Returns: "  ◄── Data Layer"
+
+        # Build full diagram
+        ascii_diagram("diagram", width=77, elements=[
+            {"type": "title", "text": "ARCHITECTURE"},
+            {"type": "spacer"},
+            {"type": "box", "text": "API Server", "x": 20, "comment": "Main service"},
+            {"type": "arrow", "direction": "down", "x": 30},
+            {"type": "box", "lines": ["Database", "(Postgres)"], "x": 20}
+        ])
+    """
+    action = action.lower()
+
+    if action == "box":
+        content = lines if lines else [text or ""]
+        box_lines = _ascii_box(content, width)
+        return {"lines": box_lines, "text": "\n".join(box_lines)}
+
+    elif action == "title":
+        title_lines = _ascii_title_box(text or "", width)
+        return {"lines": title_lines, "text": "\n".join(title_lines)}
+
+    elif action == "comment":
+        comment = _ascii_comment(text or "")
+        return {"text": comment}
+
+    elif action == "arrow":
+        direction = text or "right"
+        arrow = _ascii_arrow(direction, width)
+        return {"text": arrow}
+
+    elif action == "diagram":
+        if not elements:
+            return {"error": "elements list is required for diagram action"}
+        diagram_text = _ascii_diagram(elements, width)
+        return {"lines": diagram_text.split("\n"), "text": diagram_text}
+
+    elif action == "chars":
+        # Return available ASCII characters for reference
+        return {"chars": ASCII}
+
+    return {"error": f"Unknown action: {action}"}
+
+
+@mcp.tool()
+def batch_update(spreadsheet_id: str, requests: List[Dict[str, Any]], ctx: Context = None) -> Dict[str, Any]:
+    """
+    Low-level batch update for advanced operations not covered by other tools.
+    Use this as an escape hatch for complex operations.
+
+    Pass raw Google Sheets API request objects.
+    See: https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request
+    """
     sheets_service = ctx.request_context.lifespan_context.sheets_service
-    summaries = []
+    if not requests:
+        return {"error": "requests cannot be empty"}
+    return sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
 
-    for sid in spreadsheet_ids:
-        summary = {'spreadsheet_id': sid, 'title': None, 'sheets': [], 'error': None}
-        try:
-            ss = sheets_service.spreadsheets().get(spreadsheetId=sid, fields='properties.title,sheets(properties(title,sheetId))').execute()
-            summary['title'] = ss.get('properties', {}).get('title', 'Unknown')
 
-            for sheet in ss.get('sheets', []):
-                sheet_title = sheet.get('properties', {}).get('title')
-                sheet_summary = {'title': sheet_title, 'headers': [], 'first_rows': [], 'error': None}
-                try:
-                    result = sheets_service.spreadsheets().values().get(
-                        spreadsheetId=sid, range=f"{sheet_title}!A1:{rows_to_fetch}"
-                    ).execute()
-                    values = result.get('values', [])
-                    if values:
-                        sheet_summary['headers'] = values[0]
-                        sheet_summary['first_rows'] = values[1:] if len(values) > 1 else []
-                except Exception as e:
-                    sheet_summary['error'] = str(e)
-                summary['sheets'].append(sheet_summary)
-        except Exception as e:
-            summary['error'] = str(e)
-        summaries.append(summary)
-
-    return summaries
-
+# =============================================================================
+# RESOURCE
+# =============================================================================
 
 @mcp.resource("spreadsheet://{spreadsheet_id}/info")
 def get_spreadsheet_info(spreadsheet_id: str) -> str:
@@ -1558,103 +2443,9 @@ def get_spreadsheet_info(spreadsheet_id: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
-def create_spreadsheet(title: str, folder_id: Optional[str] = None, ctx: Context = None) -> Dict[str, Any]:
-    """Create a new spreadsheet."""
-    drive_service = ctx.request_context.lifespan_context.drive_service
-    target_folder = folder_id or ctx.request_context.lifespan_context.folder_id
-
-    body = {'name': title, 'mimeType': 'application/vnd.google-apps.spreadsheet'}
-    if target_folder:
-        body['parents'] = [target_folder]
-
-    result = drive_service.files().create(supportsAllDrives=True, body=body, fields='id, name, parents').execute()
-    return {'spreadsheetId': result['id'], 'title': result['name'], 'folder': result.get('parents', ['root'])[0]}
-
-
-@mcp.tool()
-def create_sheet(spreadsheet_id: str, title: str, ctx: Context = None) -> Dict[str, Any]:
-    """Create a new sheet tab."""
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    result = sheets_service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"addSheet": {"properties": {"title": title}}}]}
-    ).execute()
-    props = result['replies'][0]['addSheet']['properties']
-    return {'sheetId': props['sheetId'], 'title': props['title'], 'spreadsheetId': spreadsheet_id}
-
-
-@mcp.tool()
-def list_spreadsheets(folder_id: Optional[str] = None, ctx: Context = None) -> List[Dict[str, str]]:
-    """List spreadsheets in a folder."""
-    drive_service = ctx.request_context.lifespan_context.drive_service
-    target_folder = folder_id or ctx.request_context.lifespan_context.folder_id
-
-    query = "mimeType='application/vnd.google-apps.spreadsheet'"
-    if target_folder:
-        query += f" and '{target_folder}' in parents"
-
-    result = drive_service.files().list(
-        q=query, spaces='drive', includeItemsFromAllDrives=True, supportsAllDrives=True,
-        fields='files(id, name)', orderBy='modifiedTime desc'
-    ).execute()
-
-    return [{'id': f['id'], 'title': f['name']} for f in result.get('files', [])]
-
-
-@mcp.tool()
-def share_spreadsheet(spreadsheet_id: str, recipients: List[Dict[str, str]], send_notification: bool = True, ctx: Context = None) -> Dict[str, List]:
-    """Share spreadsheet. recipients: [{"email_address": "x@y.com", "role": "writer"}, ...]"""
-    drive_service = ctx.request_context.lifespan_context.drive_service
-    successes, failures = [], []
-
-    for r in recipients:
-        email, role = r.get('email_address'), r.get('role', 'writer')
-        if not email:
-            failures.append({'email': None, 'error': 'Missing email_address'})
-            continue
-        if role not in ['reader', 'commenter', 'writer']:
-            failures.append({'email': email, 'error': f"Invalid role: {role}"})
-            continue
-        try:
-            result = drive_service.permissions().create(
-                fileId=spreadsheet_id, body={'type': 'user', 'role': role, 'emailAddress': email},
-                sendNotificationEmail=send_notification, fields='id'
-            ).execute()
-            successes.append({'email': email, 'role': role, 'permissionId': result['id']})
-        except Exception as e:
-            failures.append({'email': email, 'error': str(e)})
-
-    return {"successes": successes, "failures": failures}
-
-
-@mcp.tool()
-def list_folders(parent_folder_id: Optional[str] = None, ctx: Context = None) -> List[Dict[str, str]]:
-    """List folders in Drive."""
-    drive_service = ctx.request_context.lifespan_context.drive_service
-
-    query = "mimeType='application/vnd.google-apps.folder'"
-    query += f" and '{parent_folder_id}' in parents" if parent_folder_id else " and 'root' in parents"
-
-    result = drive_service.files().list(
-        q=query, spaces='drive', includeItemsFromAllDrives=True, supportsAllDrives=True,
-        fields='files(id, name, parents)', orderBy='name'
-    ).execute()
-
-    return [{'id': f['id'], 'name': f['name'], 'parent': f.get('parents', ['root'])[0]} for f in result.get('files', [])]
-
-
-@mcp.tool()
-def batch_update(spreadsheet_id: str, requests: List[Dict[str, Any]], ctx: Context = None) -> Dict[str, Any]:
-    """
-    Low-level batch update for advanced operations.
-    For common operations, prefer: format_cells, set_borders, merge_cells, etc.
-    """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    if not requests:
-        return {"error": "requests cannot be empty"}
-    return sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
-
+# =============================================================================
+# MAIN
+# =============================================================================
 
 def main():
     transport = "stdio"
