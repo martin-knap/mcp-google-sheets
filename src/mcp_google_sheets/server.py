@@ -380,6 +380,89 @@ def _ascii_bar_chart(
     return result
 
 
+def _ascii_bar_chart_vertical(
+    data: List[Tuple[str, float]],
+    bar_height: int = 10,
+    bar_width: int = 3,
+    show_values: bool = True,
+    gap: int = 1
+) -> List[str]:
+    """
+    Create a vertical bar chart.
+
+    Args:
+        data: List of (label, value) tuples
+        bar_height: Maximum height of bars in characters
+        bar_width: Width of each bar in characters
+        show_values: Whether to show numeric values above bars
+        gap: Space between bars
+
+    Returns:
+        List of strings representing the chart lines
+    """
+    if not data:
+        return []
+
+    max_value = max(v for _, v in data)
+    if max_value <= 0:
+        max_value = 1
+
+    # Calculate bar heights (in eighths for smooth rendering)
+    bar_heights = []
+    for _, value in data:
+        ratio = value / max_value
+        total_eighths = int(ratio * bar_height * 8)
+        bar_heights.append(total_eighths)
+
+    result = []
+
+    # Value labels row (if enabled)
+    if show_values:
+        value_line = ""
+        for i, (_, value) in enumerate(data):
+            val_str = f"{value:,.0f}" if value == int(value) else f"{value:,.1f}"
+            val_str = val_str.center(bar_width)
+            value_line += val_str + " " * gap
+        result.append(value_line.rstrip())
+        result.append("")  # spacer
+
+    # Build chart from top to bottom
+    for row in range(bar_height, 0, -1):
+        line = ""
+        row_threshold = row * 8  # This row starts at this many eighths
+
+        for i, eighths in enumerate(bar_heights):
+            if eighths >= row_threshold:
+                # Full block for this row
+                line += CHART_BLOCKS[0] * bar_width
+            elif eighths > (row - 1) * 8:
+                # Partial block - calculate which character
+                partial = eighths - (row - 1) * 8
+                # Use vertical block characters (▁▂▃▄▅▆▇█)
+                char = SPARKLINE_CHARS[partial - 1] if partial > 0 else " "
+                line += char * bar_width
+            else:
+                # Empty
+                line += " " * bar_width
+            line += " " * gap
+
+        result.append(line.rstrip())
+
+    # Baseline
+    total_width = len(data) * (bar_width + gap) - gap
+    result.append("─" * total_width)
+
+    # Labels row
+    label_line = ""
+    for label, _ in data:
+        # Truncate or pad label to fit bar width
+        lbl = label[:bar_width].center(bar_width)
+        label_line += lbl + " " * gap
+    result.append(label_line.rstrip())
+
+    return result
+
+
 def _ascii_sparkline(values: List[float]) -> str:
     """
     Create a sparkline from a list of values.
@@ -690,6 +773,16 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
             show_values = elem.get("show_values", True)
             label_width = elem.get("label_width")
             chart_lines = _ascii_bar_chart(data, bar_width, show_values, label_width)
+            for line in chart_lines:
+                result.append(indent + line)
+
+        elif t == "bar_chart_vertical":
+            data = elem.get("data", [])
+            bar_height = elem.get("bar_height", 10)
+            bar_width = elem.get("bar_width", 5)
+            show_values = elem.get("show_values", True)
+            gap = elem.get("gap", 2)
+            chart_lines = _ascii_bar_chart_vertical(data, bar_height, bar_width, show_values, gap)
             for line in chart_lines:
                 result.append(indent + line)
 
