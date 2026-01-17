@@ -643,6 +643,9 @@ def sheets_data(
     match_case: bool = False,
     # Sort options
     sort_by: Optional[List[Dict[str, str]]] = None,
+    # Diagram options (builds diagram with proper alignment via helpers)
+    elements: Optional[List[Dict[str, Any]]] = None,
+    width: int = 60,
     ctx: Context = None
 ) -> Dict[str, Any]:
     """
@@ -682,11 +685,14 @@ def sheets_data(
         # Sort by column
         sheets_data(id, "Sheet1", "sort", "A1:D100", sort_by=[{"column": "B", "order": "desc"}])
 
-        # Create ASCII diagram (monospace, white background)
-        sheets_data(id, "Sheet1", "diagram", "A1", data="┌────────┐\\n│ Hello  │\\n└────────┘")
+        # Create ASCII diagram with elements (auto-calculated alignment)
+        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", width=60, elements=[
+            {"type": "title", "text": "MY SYSTEM"},
+            {"type": "box", "text": "API", "x": 20, "comment": "Main service"},
+        ])
 
-        # Create diagram with hidden gridlines for cleaner look
-        sheets_data(id, "Sheet1", "diagram", "A1", data="flowchart...", style="clean")
+        # Or with raw string (for simple/pre-built diagrams)
+        sheets_data(id, "Sheet1", "diagram", "A1", data="┌───┐\\n│ X │\\n└───┘", style="clean")
     """
     sheets_service = ctx.request_context.lifespan_context.sheets_service
     action = action.lower()
@@ -994,16 +1000,20 @@ def sheets_data(
 
     # === DIAGRAM (ASCII art / text diagrams) ===
     elif action == "diagram":
-        if not data:
-            return {"error": "data (multi-line text string or list of lines) is required for diagram action"}
+        if not data and not elements:
+            return {"error": "Either data (string) or elements (list) is required for diagram action"}
 
         sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
 
         # Parse starting position
         start_row, _, start_col, _ = _parse_a1(range) if range else (0, None, 0, None)
 
-        # Convert data to lines
-        if isinstance(data, str):
+        # Build diagram from elements (uses helpers for proper alignment)
+        if elements:
+            diagram_text = _ascii_diagram(elements, width)
+            lines = diagram_text.split('\n')
+        # Or use raw data as-is
+        elif isinstance(data, str):
             lines = data.split('\n')
         elif isinstance(data, list) and all(isinstance(item, str) for item in data):
             lines = data
