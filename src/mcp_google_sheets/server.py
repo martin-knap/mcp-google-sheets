@@ -2322,14 +2322,41 @@ def sheets_visualize(
         # Build source range
         full_range = f"{sheet}!{data_range}"
 
+        # Parse the data range to extract domain (first column) and series (other columns)
+        range_match = re.match(r'^([A-Za-z]+)(\d+):([A-Za-z]+)(\d+)$', data_range)
+        if not range_match:
+            return {"error": f"Invalid data_range format: {data_range}"}
+
+        start_col = range_match.group(1).upper()
+        start_row = int(range_match.group(2))
+        end_col = range_match.group(3).upper()
+        end_row = int(range_match.group(4))
+
+        # Domain is the first column (X-axis labels)
+        domain_range = f"{start_col}{start_row}:{start_col}{end_row}"
+
+        # Series are the subsequent columns
+        start_col_idx = _col_to_index(start_col)
+        end_col_idx = _col_to_index(end_col)
+
+        series_list = []
+        for col_idx in range(start_col_idx + 1, end_col_idx + 1):
+            col_letter = _index_to_col(col_idx)
+            series_range = f"{col_letter}{start_row}:{col_letter}{end_row}"
+            series_list.append({
+                "series": {"sourceRange": {"sources": [_grid_range(sheet_id, series_range)]}},
+                "targetAxis": "LEFT_AXIS"
+            })
+
         # Basic chart spec
         chart_spec = {
             "title": title or "",
             "basicChart": {
                 "chartType": basic_chart_type,
                 "legendPosition": "BOTTOM_LEGEND",
-                "domains": [{"domain": {"sourceRange": {"sources": [_grid_range(sheet_id, data_range)]}}}],
-                "series": [{"series": {"sourceRange": {"sources": [_grid_range(sheet_id, data_range)]}}}],
+                "headerCount": 1,
+                "domains": [{"domain": {"sourceRange": {"sources": [_grid_range(sheet_id, domain_range)]}}}],
+                "series": series_list,
             }
         }
 
@@ -2337,14 +2364,16 @@ def sheets_visualize(
         if chart_type.lower() in ("stacked_bar", "stacked_column"):
             chart_spec["basicChart"]["stackedType"] = "STACKED"
 
-        # Pie chart uses different structure
+        # Pie chart uses different structure (only first series)
         if chart_type.lower() == "pie":
+            first_series_col = _index_to_col(start_col_idx + 1)
+            first_series_range = f"{first_series_col}{start_row}:{first_series_col}{end_row}"
             chart_spec = {
                 "title": title or "",
                 "pieChart": {
-                    "legendPosition": "BOTTOM_LEGEND",
-                    "domain": {"sourceRange": {"sources": [_grid_range(sheet_id, data_range)]}},
-                    "series": {"sourceRange": {"sources": [_grid_range(sheet_id, data_range)]}},
+                    "legendPosition": "RIGHT_LEGEND",
+                    "domain": {"sourceRange": {"sources": [_grid_range(sheet_id, domain_range)]}},
+                    "series": {"sourceRange": {"sources": [_grid_range(sheet_id, first_series_range)]}},
                 }
             }
 
