@@ -2339,13 +2339,16 @@ def sheets_visualize(
         start_col_idx = _col_to_index(start_col)
         end_col_idx = _col_to_index(end_col)
 
+        # Bar charts use BOTTOM_AXIS, others use LEFT_AXIS
+        target_axis = "BOTTOM_AXIS" if chart_type.lower() in ("bar", "stacked_bar") else "LEFT_AXIS"
+
         series_list = []
         for col_idx in range(start_col_idx + 1, end_col_idx + 1):
             col_letter = _index_to_col(col_idx)
             series_range = f"{col_letter}{start_row}:{col_letter}{end_row}"
             series_list.append({
                 "series": {"sourceRange": {"sources": [_grid_range(sheet_id, series_range)]}},
-                "targetAxis": "LEFT_AXIS"
+                "targetAxis": target_axis
             })
 
         # Basic chart spec
