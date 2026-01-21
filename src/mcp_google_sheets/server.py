@@ -765,14 +765,30 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
 
         elif t == "arrow":
             direction = elem.get("direction", "down")
+            length = elem.get("length", 1)  # Number of vertical line segments
             if direction in ("down", "up"):
-                char = ASCII["arrow_d"] if direction == "down" else ASCII["arrow_u"]
+                arrow_char = ASCII["arrow_d"] if direction == "down" else ASCII["arrow_u"]
+                line_char = ASCII["v"]  # │
                 # Center vertical arrows within the diagram width (respecting indent)
                 if x == 0:
                     # No explicit x position - center within width
-                    result.append(_ascii_center(char, width))
+                    if direction == "down":
+                        for _ in range(length):
+                            result.append(_ascii_center(line_char, width))
+                        result.append(_ascii_center(arrow_char, width))
+                    else:  # up
+                        result.append(_ascii_center(arrow_char, width))
+                        for _ in range(length):
+                            result.append(_ascii_center(line_char, width))
                 else:
-                    result.append(indent + char)
+                    if direction == "down":
+                        for _ in range(length):
+                            result.append(indent + line_char)
+                        result.append(indent + arrow_char)
+                    else:  # up
+                        result.append(indent + arrow_char)
+                        for _ in range(length):
+                            result.append(indent + line_char)
             else:
                 result.append(indent + _ascii_arrow(direction, elem.get("length", 8)))
 
@@ -1153,6 +1169,8 @@ def sheets_data(
     IMPORTANT - When to use native tables vs no styling:
         - DOCUMENT/REPORT MODE: When writing multiple sections, mixed content, or demonstrating results
           with several tables in ONE call → Do NOT use style parameter. Just write raw data.
+          After writing, use sheets_format to bold section headers and table headers.
+          Add =SUM(range) or =AVERAGE(range) formulas inline for totals.
         - SINGLE TABLE MODE: When creating ONE structured table with consistent columns where the
           FIRST ROW IS THE HEADER → Use style="table". First row MUST contain column headers.
 
@@ -1165,9 +1183,12 @@ def sheets_data(
         # DOCUMENT MODE - Multiple sections, no table styling (just raw data)
         sheets_data(id, "Sheet1", "write", "A1", data=[
             ["REPORT TITLE", "", ""],
+            ["", "", ""],
             ["Section 1", "", ""],
             ["Item", "Value", "Note"],
             ["A", 100, "..."],
+            ["B", 200, "..."],
+            ["Total", "=SUM(B4:B5)", ""],  # Inline SUM formula for totals
             ["", "", ""],
             ["Section 2", "", ""],
             ...
@@ -1313,8 +1334,9 @@ def sheets_data(
                             "columnName": str(col_name) if col_name else f"Column{i+1}"
                         })
 
-                    # Generate unique table name
-                    table_name = f"Table_{sheet}_{int(time.time())}"
+                    # Generate unique table name (sanitize sheet name for valid references)
+                    safe_sheet = sheet.replace(' ', '_').replace('-', '_')
+                    table_name = f"Table_{safe_sheet}_{int(time.time())}"
 
                     # Build table spec
                     table_spec = {
@@ -2263,9 +2285,10 @@ def sheets_structure(
                 "columnName": str(col_name)
             })
 
-        # Generate table name
+        # Generate table name (sanitize sheet name for valid references)
         if not table_name:
-            table_name = f"Table_{sheet}_{int(time.time())}"
+            safe_sheet = sheet.replace(' ', '_').replace('-', '_')
+            table_name = f"Table_{safe_sheet}_{int(time.time())}"
 
         # Build table spec
         table_spec = {
