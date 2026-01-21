@@ -908,17 +908,13 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77, frame: bool 
             bottom_conn = elem.get("bottom_connector", False)
             top_conn = elem.get("top_connector", False)
 
-            # Auto-detect: if next element is a down arrow, add bottom connector
+            # Auto-detect: if next element is a down arrow, add bottom connector (arrow exits box)
             if idx + 1 < len(elements):
                 next_elem = elements[idx + 1]
                 if next_elem.get("type") == "arrow" and next_elem.get("direction", "down") == "down":
                     bottom_conn = True
 
-            # Auto-detect: if previous element was a down arrow, add top connector (arrow coming in)
-            if idx > 0:
-                prev_elem = elements[idx - 1]
-                if prev_elem.get("type") == "arrow" and prev_elem.get("direction", "down") == "down":
-                    top_conn = True
+            # NOTE: We don't auto-add top_connector - arrows point TO boxes without modifying them
 
             box_lines = _ascii_box(lines, box_width, bottom_connector=bottom_conn, top_connector=top_conn)
             middle_idx = len(box_lines) // 2  # Middle line (where content is)
