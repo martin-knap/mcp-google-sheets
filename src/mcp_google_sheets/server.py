@@ -248,231 +248,6 @@ BOX_STYLES = {
 }
 
 
-def _ascii_center(text: str, width: int) -> str:
-    """Center text within given width."""
-    if len(text) >= width:
-        return text[:width]
-    padding = width - len(text)
-    left = padding // 2
-    right = padding - left
-    return " " * left + text + " " * right
-
-
-def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int = 1,
-               bottom_connector: bool = False, top_connector: bool = False) -> List[str]:
-    """
-    Create a box around content.
-
-    Args:
-        content: Single string or list of strings (lines)
-        width: Total box width (auto-calculated if None)
-        padding: Internal padding on each side
-        bottom_connector: Add ┬ connector at bottom center (arrow exits downward)
-        top_connector: Add ┴ connector at top center (arrow enters from above)
-
-    Returns:
-        List of strings representing the box
-    """
-    lines = [content] if isinstance(content, str) else content
-    inner_width = max(len(line) for line in lines) if not width else width - 2 - (padding * 2)
-    total_width = inner_width + 2 + (padding * 2)
-
-    result = []
-    # Top border (with optional connector - ┴ shows arrow entering from above)
-    if top_connector:
-        half = (total_width - 3) // 2
-        remainder = (total_width - 3) - half
-        result.append(ASCII["tl"] + ASCII["h"] * half + ASCII["t_up"] + ASCII["h"] * remainder + ASCII["tr"])
-    else:
-        result.append(ASCII["tl"] + ASCII["h"] * (total_width - 2) + ASCII["tr"])
-    # Content lines
-    pad = " " * padding
-    for line in lines:
-        centered = _ascii_center(line, inner_width)
-        result.append(ASCII["v"] + pad + centered + pad + ASCII["v"])
-    # Bottom border (with optional connector - ┬ shows arrow exiting downward)
-    if bottom_connector:
-        half = (total_width - 3) // 2
-        remainder = (total_width - 3) - half
-        result.append(ASCII["bl"] + ASCII["h"] * half + ASCII["t_down"] + ASCII["h"] * remainder + ASCII["br"])
-    else:
-        result.append(ASCII["bl"] + ASCII["h"] * (total_width - 2) + ASCII["br"])
-    return result
-
-
-def _ascii_box_row(boxes: List[Dict[str, Any]], spacing: int = 4, merge_bottom: bool = False,
-                   diagram_width: int = None) -> List[str]:
-    """
-    Create multiple boxes side by side.
-
-    Args:
-        boxes: List of box definitions with "text" or "lines"
-        spacing: Space between boxes (default 4)
-        merge_bottom: Add merge connector lines below boxes
-        diagram_width: Target diagram width for proper merge alignment
-
-    Returns:
-        List of strings representing the row of boxes
-    """
-    # First pass: determine the widest content to normalize box widths
-    contents = []
-    max_content_width = 0
-    for box_def in boxes:
-        content = box_def.get("lines", [box_def.get("text", "")])
-        if isinstance(content, str):
-            content = [content]
-        contents.append(content)
-        content_width = max(len(line) for line in content)
-        max_content_width = max(max_content_width, content_width)
-
-    # Render each box with normalized width (all same size)
-    box_width = max_content_width + 4  # content + 2 padding + 2 borders
-    rendered_boxes = []
-    for content in contents:
-        box_lines = _ascii_box(content, width=box_width)
-        rendered_boxes.append(box_lines)
-
-    # Find max height
-    max_height = max(len(b) for b in rendered_boxes)
-
-    # Pad boxes to same height
-    for i, box in enumerate(rendered_boxes):
-        while len(box) < max_height:
-            box.insert(-1, ASCII["v"] + " " * (len(box[0]) - 2) + ASCII["v"])
-
-    # Combine horizontally
-    result = []
-    spacer = " " * spacing
-    for row_idx in range(max_height):
-        row_parts = [box[row_idx] for box in rendered_boxes]
-        result.append(spacer.join(row_parts))
-
-    # Add merge lines if requested
-    if merge_bottom and len(rendered_boxes) > 1:
-        # Calculate positions for merge connectors
-        box_centers = []
-        pos = 0
-        for box in rendered_boxes:
-            box_width = len(box[0])
-            box_centers.append(pos + box_width // 2)
-            pos += box_width + spacing
-
-        # Create merge lines
-        total_width = pos - spacing
-
-        # Vertical lines down from each box
-        merge_line1 = [" "] * total_width
-        for center in box_centers:
-            if center < total_width:
-                merge_line1[center] = ASCII["v"]
-        result.append("".join(merge_line1))
-
-        # Horizontal connector line
-        merge_line2 = [" "] * total_width
-        left_center = box_centers[0]
-        right_center = box_centers[-1]
-        for i in range(left_center, right_center + 1):
-            merge_line2[i] = ASCII["h"]
-        merge_line2[left_center] = ASCII["bl"]
-        merge_line2[right_center] = ASCII["br"]
-        # Determine the down connector position
-        # If diagram_width is provided, calculate where the row will be centered
-        # and place the merge point to align with diagram center
-        if diagram_width:
-            row_offset = (diagram_width - total_width) // 2
-            target_pos = diagram_width // 2  # Where arrows/boxes will be centered
-            mid = target_pos - row_offset  # Convert to row-local position
-            mid = max(left_center, min(right_center, mid))  # Clamp to valid range
-        else:
-            mid = total_width // 2
-
-        # Middle boxes just merge into the horizontal line (no t_up connectors)
-        merge_line2[mid] = ASCII["t_down"]
-        result.append("".join(merge_line2))
-
-        # Vertical line down from center
-        center_line = [" "] * total_width
-        center_line[mid] = ASCII["v"]
-        result.append("".join(center_line))
-
-    return result
-
-
-def _ascii_title_box(title: str, width: int = 77) -> List[str]:
-    """Create a title box (header bar) with centered title."""
-    inner = width - 2
-    return [
-        ASCII["tl"] + ASCII["h"] * inner + ASCII["tr"],
-        ASCII["v"] + _ascii_center(title, inner) + ASCII["v"],
-        ASCII["bl"] + ASCII["h"] * inner + ASCII["br"],
-    ]
-
-
-def _ascii_frame(content_lines: List[str], width: int = 77, padding: int = 1, dashed: bool = True) -> List[str]:
-    """
-    Wrap content lines with a frame/border.
-
-    Args:
-        content_lines: Lines of content to frame
-        width: Total frame width
-        padding: Vertical padding (empty lines) inside frame
-        dashed: Use dashed border style (─ ─ ─) vs solid (───)
-
-    Returns:
-        List of strings with frame around content
-    """
-    inner_width = width - 4  # 2 for borders + 2 for spacing
-    result = []
-
-    # Top border
-    if dashed:
-        border_char = ASCII["h"] + " "
-        border = (border_char * ((inner_width + 2) // 2))[:inner_width + 2]
-    else:
-        border = ASCII["h"] * (inner_width + 2)
-    result.append(ASCII["tl"] + border + ASCII["tr"])
-
-    # Top padding
-    for _ in range(padding):
-        result.append(ASCII["v"] + " " * (inner_width + 2) + ASCII["v"])
-
-    # Content lines
-    for line in content_lines:
-        # Pad or truncate line to fit
-        if len(line) < inner_width:
-            padded = line + " " * (inner_width - len(line))
-        else:
-            padded = line[:inner_width]
-        result.append(ASCII["v"] + " " + padded + " " + ASCII["v"])
-
-    # Bottom padding
-    for _ in range(padding):
-        result.append(ASCII["v"] + " " * (inner_width + 2) + ASCII["v"])
-
-    # Bottom border
-    result.append(ASCII["bl"] + border + ASCII["br"])
-
-    return result
-
-
-def _ascii_comment(text: str) -> str:
-    """Create a comment annotation like: ◄── Comment text"""
-    return f"  {ASCII['arrow_l']}{ASCII['h']}{ASCII['h']} {text}"
-
-
-def _ascii_arrow(direction: str = "right", length: int = 8) -> str:
-    """Create an arrow line. Direction: right, left, down, up."""
-    if direction == "right":
-        return ASCII["h"] * (length - 1) + ASCII["arrow_r"]
-    elif direction == "left":
-        return ASCII["arrow_l"] + ASCII["h"] * (length - 1)
-    elif direction == "down":
-        return ASCII["v"]  # Vertical arrows are single char per line
-    elif direction == "up":
-        return ASCII["v"]
-    return ASCII["h"] * length
-
-
 def _ascii_bar(value: float, max_value: float, bar_width: int = 20) -> str:
     """
     Create a horizontal bar using block characters.
@@ -863,200 +638,6 @@ def _ascii_table(
     return lines
 
 
-def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77, frame: bool = False) -> str:
-    """
-    Build a complete diagram from elements.
-
-    Elements can be:
-        {"type": "title", "text": "TITLE"}
-        {"type": "box", "text": "Content", "x": 4, "comment": "← annotation"}
-        {"type": "box", "lines": ["Line1", "Line2"], "x": 4}
-        {"type": "row", "boxes": [{"text": "A"}, {"text": "B"}], "merge": true, "spacing": 4}
-        {"type": "line", "text": "───────►"}
-        {"type": "arrow", "direction": "down", "length": 2}
-        {"type": "text", "text": "Raw text", "comment": "Optional comment"}
-        {"type": "spacer"}
-        {"type": "bar_chart", "data": [("Label", 100), ("Label2", 50)], "bar_width": 20}
-        {"type": "sparkline", "data": [1, 5, 3, 8, 4], "label": "Trend:"}
-        {"type": "progress", "value": 75, "max": 100, "width": 20}
-        {"type": "shaded_box", "width": 40, "height": 10, "palette": "blocks", "direction": "radial"}
-        {"type": "table", "headers": ["A", "B"], "rows": [["1", "2"]], "box_style": "light"}
-
-    Args:
-        elements: List of element dictionaries
-        width: Total diagram width
-        frame: Wrap entire diagram in a dashed border
-
-    Returns:
-        Multi-line string of the diagram
-    """
-    # If frame is enabled, reduce inner width to account for border
-    inner_width = width - 4 if frame else width
-    result = []
-
-    # Use index-based iteration for lookahead
-    for idx, elem in enumerate(elements):
-        t = elem.get("type", "text")
-        x = elem.get("x", 0)  # indent
-        indent = " " * x
-        comment = elem.get("comment", "")
-        comment_str = _ascii_comment(comment) if comment else ""
-
-        if t == "title":
-            for line in _ascii_title_box(elem["text"], inner_width):
-                result.append(line)
-
-        elif t == "row":
-            # Horizontal row of boxes
-            boxes = elem.get("boxes", [])
-            merge = elem.get("merge", False)
-            spacing = elem.get("spacing", 4)  # Default 4 spaces between boxes
-            row_lines = _ascii_box_row(boxes, spacing=spacing, merge_bottom=merge, diagram_width=inner_width)
-            # Center the row
-            if row_lines:
-                row_width = len(row_lines[0])
-                row_offset = (inner_width - row_width) // 2 if row_width < inner_width else 0
-                row_indent = " " * row_offset
-                for line in row_lines:
-                    result.append(row_indent + line)
-
-        elif t == "box":
-            box_width = elem.get("width")
-            lines = elem.get("lines", [elem.get("text", "")])
-
-            # Check for explicit connector settings or auto-detect from context
-            bottom_conn = elem.get("bottom_connector", False)
-            top_conn = elem.get("top_connector", False)
-
-            # Auto-detect: if next element is a down arrow, add bottom connector (arrow exits box)
-            if idx + 1 < len(elements):
-                next_elem = elements[idx + 1]
-                if next_elem.get("type") == "arrow" and next_elem.get("direction", "down") == "down":
-                    bottom_conn = True
-
-            # NOTE: We don't auto-add top_connector - arrows point TO boxes without modifying them
-
-            box_lines = _ascii_box(lines, box_width, bottom_connector=bottom_conn, top_connector=top_conn)
-            middle_idx = len(box_lines) // 2  # Middle line (where content is)
-            # Calculate centering: place box so its center aligns with inner_width // 2
-            actual_box_width = len(box_lines[0]) if box_lines else 0
-            center_pos = inner_width // 2
-            center_offset = center_pos - actual_box_width // 2 if x == 0 and actual_box_width < inner_width else 0
-            center_offset = max(0, center_offset)  # Ensure non-negative
-            center_indent = " " * center_offset
-            for i, line in enumerate(box_lines):
-                full_line = (center_indent if x == 0 else indent) + line
-                if comment_str and i == middle_idx:
-                    full_line += comment_str
-                result.append(full_line)
-
-        elif t == "spacer":
-            result.append("")
-
-        elif t == "text":
-            line = indent + elem.get("text", "")
-            if comment_str:
-                line += comment_str
-            result.append(line)
-
-        elif t == "arrow":
-            direction = elem.get("direction", "down")
-            length = elem.get("length", 1)  # Number of vertical line segments
-            if direction in ("down", "up"):
-                arrow_char = ASCII["arrow_d"] if direction == "down" else ASCII["arrow_u"]
-                line_char = ASCII["v"]  # │
-                # Center vertical arrows at inner_width // 2 (same as box center)
-                if x == 0:
-                    # No explicit x position - center at inner_width // 2
-                    center_pos = inner_width // 2
-                    arrow_indent = " " * center_pos
-                    if direction == "down":
-                        for _ in range(length):
-                            result.append(arrow_indent + line_char)
-                        result.append(arrow_indent + arrow_char)
-                    else:  # up
-                        result.append(arrow_indent + arrow_char)
-                        for _ in range(length):
-                            result.append(arrow_indent + line_char)
-                else:
-                    if direction == "down":
-                        for _ in range(length):
-                            result.append(indent + line_char)
-                        result.append(indent + arrow_char)
-                    else:  # up
-                        result.append(indent + arrow_char)
-                        for _ in range(length):
-                            result.append(indent + line_char)
-            else:
-                result.append(indent + _ascii_arrow(direction, elem.get("length", 8)))
-
-        elif t == "bar_chart":
-            data = elem.get("data", [])
-            bar_width = elem.get("bar_width", 20)
-            show_values = elem.get("show_values", True)
-            label_width = elem.get("label_width")
-            chart_lines = _ascii_bar_chart(data, bar_width, show_values, label_width)
-            for line in chart_lines:
-                result.append(indent + line)
-
-        elif t == "bar_chart_vertical":
-            data = elem.get("data", [])
-            bar_height = elem.get("bar_height", 10)
-            bar_width = elem.get("bar_width", 5)
-            show_values = elem.get("show_values", True)
-            gap = elem.get("gap", 2)
-            chart_lines = _ascii_bar_chart_vertical(data, bar_height, bar_width, show_values, gap)
-            for line in chart_lines:
-                result.append(indent + line)
-
-        elif t == "sparkline":
-            data = elem.get("data", [])
-            label = elem.get("label", "")
-            spark = _ascii_sparkline(data)
-            line = indent + (f"{label} " if label else "") + spark
-            if comment_str:
-                line += comment_str
-            result.append(line)
-
-        elif t == "progress":
-            value = elem.get("value", 0)
-            max_val = elem.get("max", 100)
-            bar_width = elem.get("width", 20)
-            show_percent = elem.get("show_percent", True)
-            label = elem.get("label", "")
-            bar = _ascii_progress_bar(value, max_val, bar_width, show_percent)
-            line = indent + (f"{label} " if label else "") + bar
-            if comment_str:
-                line += comment_str
-            result.append(line)
-
-        elif t == "shaded_box":
-            box_width = elem.get("width", 40)
-            box_height = elem.get("height", 10)
-            title = elem.get("title")
-            palette = elem.get("palette", "blocks")
-            direction = elem.get("direction", "radial")
-            contrast = elem.get("contrast", 0.7)
-            box_style = elem.get("box_style", "light")
-            shaded_lines = _ascii_shaded_box(box_width, box_height, title, palette, direction, contrast, box_style)
-            for line in shaded_lines:
-                result.append(indent + line)
-
-        elif t == "table":
-            headers = elem.get("headers", [])
-            rows = elem.get("rows", [])
-            box_style = elem.get("box_style", "light")
-            table_lines = _ascii_table(headers, rows, box_style)
-            for line in table_lines:
-                result.append(indent + line)
-
-    # Wrap in frame if requested
-    if frame:
-        result = _ascii_frame(result, width, padding=1, dashed=True)
-
-    return "\n".join(result)
-
-
 # =============================================================================
 # INTERNAL UTILITIES
 # =============================================================================
@@ -1347,10 +928,8 @@ def sheets_data(
     match_case: bool = False,
     # Sort options
     sort_by: Optional[List[Dict[str, str]]] = None,
-    # Diagram options (builds diagram with proper alignment via helpers)
-    elements: Optional[List[Dict[str, Any]]] = None,
+    # Diagram options
     width: int = 60,
-    frame: bool = False,  # Wrap diagram in dashed border
     ctx: Context = None
 ) -> Dict[str, Any]:
     """
@@ -1416,45 +995,8 @@ def sheets_data(
         # Sort by column
         sheets_data(id, "Sheet1", "sort", "A1:D100", sort_by=[{"column": "B", "order": "desc"}])
 
-        # Create ASCII diagram with elements (auto-calculated alignment)
-        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", width=60, elements=[
-            {"type": "title", "text": "MY SYSTEM"},
-            {"type": "box", "text": "API", "x": 20, "comment": "Main service"},
-        ])
-
-        # Or with raw string (for simple/pre-built diagrams)
-        sheets_data(id, "Sheet1", "diagram", "A1", data="┌───┐\\n│ X │\\n└───┘", style="clean")
-
-        # Create diagram with bar chart (uses █▉▊▋▌▍▎▏ block elements)
-        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", width=60, elements=[
-            {"type": "title", "text": "SALES REPORT"},
-            {"type": "spacer"},
-            {"type": "bar_chart", "data": [["Q1", 100], ["Q2", 150], ["Q3", 120]], "bar_width": 25},
-        ])
-
-        # Create diagram with sparkline (uses ▁▂▃▄▅▆▇█ characters)
-        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", elements=[
-            {"type": "text", "text": "Weekly trend:"},
-            {"type": "sparkline", "data": [10, 15, 12, 18, 14, 20, 16], "label": "Views"},
-        ])
-
-        # Create diagram with progress bar
-        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", elements=[
-            {"type": "progress", "value": 75, "max": 100, "width": 20, "label": "Complete:"},
-        ])
-
-        # Create diagram with shaded box (gradient fill)
-        # Palettes: ascii, blocks, dots, density, braille
-        # Directions: horizontal, vertical, radial, diagonal
-        # Box styles: light, heavy, double, rounded
-        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", elements=[
-            {"type": "shaded_box", "width": 50, "height": 10, "title": "Status", "palette": "blocks", "direction": "radial", "box_style": "double"},
-        ])
-
-        # Create diagram with bordered table
-        sheets_data(id, "Sheet1", "diagram", "A1", style="clean", elements=[
-            {"type": "table", "headers": ["Task", "Status", "Progress"], "rows": [["Deploy", "✓", "100%"], ["Test", "⏳", "65%"]], "box_style": "heavy"},
-        ])
+        # Create ASCII diagram with raw text (use style="clean" to hide gridlines)
+        sheets_data(id, "Sheet1", "diagram", "A1", data="┌───────┐\\n│  API  │\\n└───┬───┘\\n    │\\n    ▼\\n┌───────┐\\n│  DB   │\\n└───────┘", style="clean")
     """
     sheets_service = ctx.request_context.lifespan_context.sheets_service
     action = action.lower()
@@ -1837,20 +1379,16 @@ def sheets_data(
 
     # === DIAGRAM (ASCII art / text diagrams) ===
     elif action == "diagram":
-        if not data and not elements:
-            return {"error": "Either data (string) or elements (list) is required for diagram action"}
+        if not data:
+            return {"error": "data (string or list of strings) is required for diagram action"}
 
         sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
 
         # Parse starting position
         start_row, _, start_col, _ = _parse_a1(range) if range else (0, None, 0, None)
 
-        # Build diagram from elements (uses helpers for proper alignment)
-        if elements:
-            diagram_text = _ascii_diagram(elements, width, frame=frame)
-            lines = diagram_text.split('\n')
-        # Or use raw data as-is
-        elif isinstance(data, str):
+        # Parse data as raw text
+        if isinstance(data, str):
             lines = data.split('\n')
         elif isinstance(data, list) and all(isinstance(item, str) for item in data):
             lines = data
@@ -3351,10 +2889,8 @@ def get_presets(ctx: Context = None) -> Dict[str, Any]:
 def ascii_diagram(
     action: str,
     text: Optional[str] = None,
-    lines: Optional[List[str]] = None,
     width: int = 77,
     height: int = 10,
-    elements: Optional[List[Dict[str, Any]]] = None,
     data: Optional[List[Any]] = None,
     headers: Optional[List[str]] = None,
     rows: Optional[List[List[str]]] = None,
@@ -3365,46 +2901,31 @@ def ascii_diagram(
     ctx: Context = None
 ) -> Dict[str, Any]:
     """
-    Build ASCII diagrams programmatically with proper alignment.
+    Build ASCII chart elements for diagrams.
+
+    For complex diagrams (flowcharts, architecture diagrams), use sheets_data with
+    action="diagram" and pass raw ASCII art via the data parameter. This tool is
+    for generating specific chart components.
 
     Actions:
-        box: Create a box with centered text
-        title: Create a title bar (single-line box)
-        comment: Create a comment annotation (◄── text)
-        arrow: Create an arrow (direction: right, left, down, up)
-        diagram: Build full diagram from elements list
         bar_chart: Create horizontal bar chart from data
         sparkline: Create inline sparkline from numeric data
         progress: Create progress bar
         shaded_box: Create a box with gradient shading fill
         table: Create a bordered data table
+        chars: Get available ASCII/Unicode characters for manual diagram building
 
     Args:
-        text: Text content for box/title/comment/shaded_box title
-        lines: Multiple lines for box content
-        width: Total width (default 77, good for sheets)
+        text: Label text for sparkline, or title for shaded_box
+        width: Bar width for charts (default 77)
         height: Height for shaded_box (default 10)
-        elements: List of element dicts for "diagram" action
-        data: Data for charts (bar_chart: [("label", value)...], sparkline: [1,2,3...])
+        data: Data for charts (bar_chart: [("label", value)...], sparkline: [1,2,3...], progress: [value] or [value, max])
         headers: Column headers for table action
         rows: Data rows for table action
         palette: Shading palette (ascii, blocks, dots, density, braille)
         direction: Gradient direction (horizontal, vertical, radial, diagonal)
         contrast: Contrast level 0.0-1.0 for shaded_box
         box_style: Border style (light, heavy, double, rounded)
-
-    Element types for "diagram" action:
-        {"type": "title", "text": "TITLE TEXT"}
-        {"type": "box", "text": "Content"} or {"type": "box", "lines": ["Line1", "Line2"]}
-        {"type": "box", "text": "Content", "x": 4, "comment": "◄── Note"}
-        {"type": "text", "text": "Raw line", "x": 10}
-        {"type": "arrow", "direction": "down", "x": 20}
-        {"type": "spacer"}
-        {"type": "bar_chart", "data": [("Sales", 100), ("Costs", 50)], "bar_width": 20}
-        {"type": "sparkline", "data": [1,5,3,8,4], "label": "Trend:"}
-        {"type": "progress", "value": 75, "max": 100, "width": 20}
-        {"type": "shaded_box", "width": 40, "height": 10, "palette": "blocks", "direction": "radial"}
-        {"type": "table", "headers": ["Col1", "Col2"], "rows": [["A", "B"]], "box_style": "light"}
 
     Shading palettes:
         ascii: " .:-=+*#%@" (classic ASCII art)
@@ -3420,49 +2941,27 @@ def ascii_diagram(
         rounded: ╭─╮│╰╯ (friendly)
 
     Examples:
+        # Create a horizontal bar chart
+        ascii_diagram("bar_chart", data=[["Sales", 100], ["Costs", 50]], width=30)
+
+        # Create a sparkline
+        ascii_diagram("sparkline", data=[1, 5, 3, 8, 4], text="Trend:")
+
+        # Create a progress bar
+        ascii_diagram("progress", data=[75, 100], width=20)
+
         # Create a shaded box with radial gradient
         ascii_diagram("shaded_box", text="Status", width=50, height=12, palette="blocks", direction="radial")
-
-        # Create a shaded box with horizontal gradient using double border
-        ascii_diagram("shaded_box", width=40, height=8, palette="dots", direction="horizontal", box_style="double")
 
         # Create a data table
         ascii_diagram("table", headers=["Task", "Status"], rows=[["Deploy", "✓"], ["Test", "⏳"]], box_style="heavy")
 
-        # Build diagram with shaded box
-        ascii_diagram("diagram", elements=[
-            {"type": "title", "text": "DASHBOARD"},
-            {"type": "shaded_box", "width": 50, "height": 8, "palette": "blocks", "direction": "radial", "title": "Metrics"},
-            {"type": "table", "headers": ["Name", "Value"], "rows": [["CPU", "45%"], ["RAM", "2.1GB"]]}
-        ])
+        # Get available characters for manual diagram building
+        ascii_diagram("chars")
     """
     action = action.lower()
 
-    if action == "box":
-        content = lines if lines else [text or ""]
-        box_lines = _ascii_box(content, width)
-        return {"lines": box_lines, "text": "\n".join(box_lines)}
-
-    elif action == "title":
-        title_lines = _ascii_title_box(text or "", width)
-        return {"lines": title_lines, "text": "\n".join(title_lines)}
-
-    elif action == "comment":
-        comment = _ascii_comment(text or "")
-        return {"text": comment}
-
-    elif action == "arrow":
-        direction = text or "right"
-        arrow = _ascii_arrow(direction, width)
-        return {"text": arrow}
-
-    elif action == "diagram":
-        if not elements:
-            return {"error": "elements list is required for diagram action"}
-        diagram_text = _ascii_diagram(elements, width)
-        return {"lines": diagram_text.split("\n"), "text": diagram_text}
-
-    elif action == "bar_chart":
+    if action == "bar_chart":
         if not data:
             return {"error": "data is required for bar_chart action (list of (label, value) tuples)"}
         # Convert list of lists to list of tuples if needed
