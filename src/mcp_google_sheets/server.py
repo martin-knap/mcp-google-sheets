@@ -300,7 +300,8 @@ def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int =
     return result
 
 
-def _ascii_box_row(boxes: List[Dict[str, Any]], spacing: int = 4, merge_bottom: bool = False) -> List[str]:
+def _ascii_box_row(boxes: List[Dict[str, Any]], spacing: int = 4, merge_bottom: bool = False,
+                   diagram_width: int = None) -> List[str]:
     """
     Create multiple boxes side by side.
 
@@ -308,6 +309,7 @@ def _ascii_box_row(boxes: List[Dict[str, Any]], spacing: int = 4, merge_bottom: 
         boxes: List of box definitions with "text" or "lines"
         spacing: Space between boxes (default 4)
         merge_bottom: Add merge connector lines below boxes
+        diagram_width: Target diagram width for proper merge alignment
 
     Returns:
         List of strings representing the row of boxes
@@ -362,11 +364,18 @@ def _ascii_box_row(boxes: List[Dict[str, Any]], spacing: int = 4, merge_bottom: 
             merge_line2[i] = ASCII["h"]
         merge_line2[left_center] = ASCII["bl"]
         merge_line2[right_center] = ASCII["br"]
-        # Determine the down connector position - use row center for alignment
-        mid = total_width // 2
+        # Determine the down connector position
+        # If diagram_width is provided, calculate where the row will be centered
+        # and place the merge point to align with diagram center
+        if diagram_width:
+            row_offset = (diagram_width - total_width) // 2
+            target_pos = diagram_width // 2  # Where arrows/boxes will be centered
+            mid = target_pos - row_offset  # Convert to row-local position
+            mid = max(left_center, min(right_center, mid))  # Clamp to valid range
+        else:
+            mid = total_width // 2
 
         # Middle boxes just merge into the horizontal line (no t_up connectors)
-        # This creates a cleaner look: ──┼── at center instead of ┴┬
         merge_line2[mid] = ASCII["t_down"]
         result.append("".join(merge_line2))
 
@@ -891,7 +900,7 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77, frame: bool 
             boxes = elem.get("boxes", [])
             merge = elem.get("merge", False)
             spacing = elem.get("spacing", 4)  # Default 4 spaces between boxes
-            row_lines = _ascii_box_row(boxes, spacing=spacing, merge_bottom=merge)
+            row_lines = _ascii_box_row(boxes, spacing=spacing, merge_bottom=merge, diagram_width=inner_width)
             # Center the row
             if row_lines:
                 row_width = len(row_lines[0])
