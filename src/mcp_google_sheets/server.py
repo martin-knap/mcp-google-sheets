@@ -744,8 +744,12 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
             lines = elem.get("lines", [elem.get("text", "")])
             box_lines = _ascii_box(lines, box_width)
             middle_idx = len(box_lines) // 2  # Middle line (where content is)
+            # Calculate centering offset if no explicit x position
+            actual_box_width = len(box_lines[0]) if box_lines else 0
+            center_offset = (width - actual_box_width) // 2 if x == 0 and actual_box_width < width else 0
+            center_indent = " " * center_offset if center_offset > 0 else ""
             for i, line in enumerate(box_lines):
-                full_line = indent + line
+                full_line = (center_indent if x == 0 else indent) + line
                 if comment_str and i == middle_idx:
                     full_line += comment_str
                 result.append(full_line)
@@ -763,7 +767,12 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
             direction = elem.get("direction", "down")
             if direction in ("down", "up"):
                 char = ASCII["arrow_d"] if direction == "down" else ASCII["arrow_u"]
-                result.append(indent + char)
+                # Center vertical arrows within the diagram width (respecting indent)
+                if x == 0:
+                    # No explicit x position - center within width
+                    result.append(_ascii_center(char, width))
+                else:
+                    result.append(indent + char)
             else:
                 result.append(indent + _ascii_arrow(direction, elem.get("length", 8)))
 
@@ -1108,6 +1117,7 @@ def sheets_data(
     data: Optional[Union[List[List[Any]], str]] = None,
     style: Optional[str] = None,
     column_types: Optional[Dict[str, str]] = None,
+    totals: Optional[List[str]] = None,  # Column names to add SUM totals for (native tables only)
     # Search options
     filters: Optional[List[Dict[str, str]]] = None,
     match_all: bool = True,
@@ -1140,14 +1150,35 @@ def sheets_data(
         Native tables (auto-expand, filters): "table" (default green), "table_green", "table_gray", "table_red"
         Styled ranges (no auto-expand): "basic", "basic_striped", "basic_bordered"
 
+    IMPORTANT - When to use native tables vs no styling:
+        - DOCUMENT/REPORT MODE: When writing multiple sections, mixed content, or demonstrating results
+          with several tables in ONE call → Do NOT use style parameter. Just write raw data.
+        - SINGLE TABLE MODE: When creating ONE structured table with consistent columns where the
+          FIRST ROW IS THE HEADER → Use style="table". First row MUST contain column headers.
+
     Column types: {"B": "currency", "C:E": "percent", "F": "date"} - see NUMBER_FORMATS for options
 
     Examples:
         # Read data
         sheets_data(id, "Sheet1", "read", "A1:D10")
 
-        # Write with native table formatting (like Format > Convert to Table)
+        # DOCUMENT MODE - Multiple sections, no table styling (just raw data)
+        sheets_data(id, "Sheet1", "write", "A1", data=[
+            ["REPORT TITLE", "", ""],
+            ["Section 1", "", ""],
+            ["Item", "Value", "Note"],
+            ["A", 100, "..."],
+            ["", "", ""],
+            ["Section 2", "", ""],
+            ...
+        ])  # No style parameter!
+
+        # SINGLE TABLE MODE - One structured table with headers in first row
         sheets_data(id, "Sheet1", "write", "A1", data=[["Name","Sales"],["John",1000]], style="table", column_types={"B": "currency"})
+
+        # SINGLE TABLE with totals row - adds SUM formulas using structured references
+        sheets_data(id, "Sheet1", "write", "A1", data=[["Product","Qty","Price"],["A",10,100],["B",20,200]],
+                   style="table", totals=["Qty", "Price"])  # Adds row with =SUM(TableName[Qty]), =SUM(TableName[Price])
 
         # Write with basic styled range (no filters, no auto-expand)
         sheets_data(id, "Sheet1", "write", "A1", data=[["Name","Sales"],["John",1000]], style="basic_striped")
@@ -1253,8 +1284,27 @@ def sheets_data(
                         "startColumnIndex": start_col, "endColumnIndex": end_col}
 
                 # Check if this is a native table style (uses addTable API)
-                if ts.get('native', False):
+                use_native = ts.get('native', False)
+
+                if use_native:
+                    # Validate that data has proper columnar structure for native table
                     # Build column properties from header row (first row of data)
+                    header_row = data[0] if data else []
+
+                    # Count non-empty header cells
+                    non_empty_headers = sum(1 for h in header_row if h and str(h).strip())
+                    total_cols = len(header_row)
+
+                    # Native tables require at least 2 columns with defined headers
+                    # and more than half of headers should be non-empty
+                    if not (total_cols >= 2 and
+                            non_empty_headers >= 2 and
+                            non_empty_headers > total_cols // 2):
+                        # Fall back to basic styling when data isn't proper tabular format
+                        use_native = False
+                        ts = TABLE_STYLES.get('basic', {})
+
+                if use_native:
                     header_row = data[0] if data else []
                     column_properties = []
                     for i, col_name in enumerate(header_row):
@@ -1294,6 +1344,17 @@ def sheets_data(
 
                     results['native_table'] = True
                     results['table_name'] = table_name
+
+                    # Store totals info for later (after table is created)
+                    if totals and header_row:
+                        results['_pending_totals'] = {
+                            'table_name': table_name,
+                            'header_row': header_row,
+                            'totals': totals,
+                            'totals_row': end_row,
+                            'start_col': start_col,
+                            'end_col': end_col
+                        }
 
                 else:
                     # Legacy/basic table styling (manual formatting)
@@ -1378,6 +1439,50 @@ def sheets_data(
                     spreadsheetId=spreadsheet_id, body={"requests": requests}
                 ).execute()
                 results['format'] = {'requests_executed': len(requests)}
+
+            # Add totals row AFTER table is created (so structured references work)
+            if '_pending_totals' in results:
+                pt = results.pop('_pending_totals')
+                table_name = pt['table_name']
+                header_row = pt['header_row']
+                totals_cols = pt['totals']
+                totals_row = pt['totals_row']
+                t_start_col = pt['start_col']
+                t_end_col = pt['end_col']
+
+                # Build totals row - map column names to formulas
+                totals_data = []
+                for col_name in header_row:
+                    col_str = str(col_name) if col_name else ""
+                    if col_str in totals_cols:
+                        # Use structured reference: =SUM(TableName[ColumnName])
+                        totals_data.append(f'=SUM({table_name}[{col_str}])')
+                    else:
+                        totals_data.append("")  # Empty for non-total columns
+
+                # First cell can have "Total" label if first column isn't being summed
+                if totals_data and not totals_data[0]:
+                    totals_data[0] = "Total"
+
+                # Write totals row below the table
+                totals_range = f"{sheet}!{_index_to_col(t_start_col)}{totals_row + 1}"
+                sheets_service.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id, range=totals_range,
+                    valueInputOption="USER_ENTERED", body={"values": [totals_data]}
+                ).execute()
+
+                # Bold the totals row
+                sheets_service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id, body={"requests": [{
+                        "repeatCell": {
+                            "range": {"sheetId": sheet_id, "startRowIndex": totals_row, "endRowIndex": totals_row + 1,
+                                      "startColumnIndex": t_start_col, "endColumnIndex": t_end_col},
+                            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                            "fields": "userEnteredFormat.textFormat.bold"
+                        }
+                    }]}
+                ).execute()
+                results['totals_row'] = totals_row + 1
 
         return results
 
@@ -1929,6 +2034,11 @@ def sheets_structure(
     Table styles (via validation param): "table" (default), "table_green", "table_gray", "table_red"
     Or pass custom table name: validation="MyTableName"
 
+    IMPORTANT - table action requirements:
+        - First row of range MUST be column headers (not a title or merged content)
+        - At least 2 columns with defined headers required
+        - Use for SINGLE structured datasets only, not for document-style layouts
+
     Examples:
         # Auto-resize all columns
         sheets_structure(id, "Sheet1", "resize", columns="all")
@@ -2135,8 +2245,16 @@ def sheets_structure(
         ).execute()
         header_row = header_result.get('values', [[]])[0] if header_result.get('values') else []
 
-        # Build column properties from header row
+        # Validate that data has proper columnar structure for native table
         num_cols = end_col - start_col if end_col else len(header_row)
+        non_empty_headers = sum(1 for h in header_row if h and str(h).strip())
+
+        # Native tables require at least 2 columns with defined headers
+        # and more than half of headers should be non-empty
+        if not (num_cols >= 2 and non_empty_headers >= 2 and non_empty_headers > num_cols // 2):
+            return {"error": "Cannot create native table: data must have at least 2 columns with defined headers. Use style='basic' for non-tabular data."}
+
+        # Build column properties from header row
         column_properties = []
         for i in range(num_cols):
             col_name = header_row[i] if i < len(header_row) and header_row[i] else f"Column{i+1}"
