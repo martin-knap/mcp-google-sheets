@@ -300,23 +300,23 @@ def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int =
     return result
 
 
-def _ascii_box_row(boxes: List[Dict[str, Any]], spacing: int = 2, merge_bottom: bool = False) -> List[str]:
+def _ascii_box_row(boxes: List[Dict[str, Any]], spacing: int = 4, merge_bottom: bool = False) -> List[str]:
     """
     Create multiple boxes side by side.
 
     Args:
         boxes: List of box definitions with "text" or "lines"
-        spacing: Space between boxes
+        spacing: Space between boxes (default 4)
         merge_bottom: Add merge connector lines below boxes
 
     Returns:
         List of strings representing the row of boxes
     """
-    # Render each box
+    # Render each box (no connectors - regular corners)
     rendered_boxes = []
     for box_def in boxes:
         content = box_def.get("lines", [box_def.get("text", "")])
-        box_lines = _ascii_box(content, bottom_connector=merge_bottom)
+        box_lines = _ascii_box(content)
         rendered_boxes.append(box_lines)
 
     # Find max height
@@ -387,6 +387,53 @@ def _ascii_title_box(title: str, width: int = 77) -> List[str]:
         ASCII["v"] + _ascii_center(title, inner) + ASCII["v"],
         ASCII["bl"] + ASCII["h"] * inner + ASCII["br"],
     ]
+
+
+def _ascii_frame(content_lines: List[str], width: int = 77, padding: int = 1, dashed: bool = True) -> List[str]:
+    """
+    Wrap content lines with a frame/border.
+
+    Args:
+        content_lines: Lines of content to frame
+        width: Total frame width
+        padding: Vertical padding (empty lines) inside frame
+        dashed: Use dashed border style (─ ─ ─) vs solid (───)
+
+    Returns:
+        List of strings with frame around content
+    """
+    inner_width = width - 4  # 2 for borders + 2 for spacing
+    result = []
+
+    # Top border
+    if dashed:
+        border_char = ASCII["h"] + " "
+        border = (border_char * ((inner_width + 2) // 2))[:inner_width + 2]
+    else:
+        border = ASCII["h"] * (inner_width + 2)
+    result.append(ASCII["tl"] + border + ASCII["tr"])
+
+    # Top padding
+    for _ in range(padding):
+        result.append(ASCII["v"] + " " * (inner_width + 2) + ASCII["v"])
+
+    # Content lines
+    for line in content_lines:
+        # Pad or truncate line to fit
+        if len(line) < inner_width:
+            padded = line + " " * (inner_width - len(line))
+        else:
+            padded = line[:inner_width]
+        result.append(ASCII["v"] + " " + padded + " " + ASCII["v"])
+
+    # Bottom padding
+    for _ in range(padding):
+        result.append(ASCII["v"] + " " * (inner_width + 2) + ASCII["v"])
+
+    # Bottom border
+    result.append(ASCII["bl"] + border + ASCII["br"])
+
+    return result
 
 
 def _ascii_comment(text: str) -> str:
@@ -797,7 +844,7 @@ def _ascii_table(
     return lines
 
 
-def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
+def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77, frame: bool = False) -> str:
     """
     Build a complete diagram from elements.
 
@@ -805,7 +852,7 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
         {"type": "title", "text": "TITLE"}
         {"type": "box", "text": "Content", "x": 4, "comment": "← annotation"}
         {"type": "box", "lines": ["Line1", "Line2"], "x": 4}
-        {"type": "row", "boxes": [{"text": "A"}, {"text": "B"}], "merge": true}
+        {"type": "row", "boxes": [{"text": "A"}, {"text": "B"}], "merge": true, "spacing": 4}
         {"type": "line", "text": "───────►"}
         {"type": "arrow", "direction": "down", "length": 2}
         {"type": "text", "text": "Raw text", "comment": "Optional comment"}
@@ -816,9 +863,16 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
         {"type": "shaded_box", "width": 40, "height": 10, "palette": "blocks", "direction": "radial"}
         {"type": "table", "headers": ["A", "B"], "rows": [["1", "2"]], "box_style": "light"}
 
+    Args:
+        elements: List of element dictionaries
+        width: Total diagram width
+        frame: Wrap entire diagram in a dashed border
+
     Returns:
         Multi-line string of the diagram
     """
+    # If frame is enabled, reduce inner width to account for border
+    inner_width = width - 4 if frame else width
     result = []
 
     # Use index-based iteration for lookahead
@@ -829,29 +883,20 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
         comment = elem.get("comment", "")
         comment_str = _ascii_comment(comment) if comment else ""
 
-        # Check if next element is a down arrow (for connector)
-        next_is_down_arrow = (idx + 1 < len(elements) and
-                              elements[idx + 1].get("type") == "arrow" and
-                              elements[idx + 1].get("direction", "down") == "down")
-        # Check if previous element was a down arrow (for top connector)
-        prev_was_down_arrow = (idx > 0 and
-                               elements[idx - 1].get("type") == "arrow" and
-                               elements[idx - 1].get("direction", "down") == "down")
-
         if t == "title":
-            for line in _ascii_title_box(elem["text"], width):
+            for line in _ascii_title_box(elem["text"], inner_width):
                 result.append(line)
 
         elif t == "row":
             # Horizontal row of boxes
             boxes = elem.get("boxes", [])
             merge = elem.get("merge", False)
-            spacing = elem.get("spacing", 2)
+            spacing = elem.get("spacing", 4)  # Default 4 spaces between boxes
             row_lines = _ascii_box_row(boxes, spacing=spacing, merge_bottom=merge)
             # Center the row
             if row_lines:
                 row_width = len(row_lines[0])
-                row_offset = (width - row_width) // 2 if row_width < width else 0
+                row_offset = (inner_width - row_width) // 2 if row_width < inner_width else 0
                 row_indent = " " * row_offset
                 for line in row_lines:
                     result.append(row_indent + line)
@@ -859,15 +904,13 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
         elif t == "box":
             box_width = elem.get("width")
             lines = elem.get("lines", [elem.get("text", "")])
-            # Add connectors when arrows are adjacent
-            box_lines = _ascii_box(lines, box_width,
-                                   bottom_connector=next_is_down_arrow,
-                                   top_connector=prev_was_down_arrow)
+            # Use regular box corners - visual alignment creates connection
+            box_lines = _ascii_box(lines, box_width)
             middle_idx = len(box_lines) // 2  # Middle line (where content is)
-            # Calculate centering: place box so its center aligns with width // 2
+            # Calculate centering: place box so its center aligns with inner_width // 2
             actual_box_width = len(box_lines[0]) if box_lines else 0
-            center_pos = width // 2
-            center_offset = center_pos - actual_box_width // 2 if x == 0 and actual_box_width < width else 0
+            center_pos = inner_width // 2
+            center_offset = center_pos - actual_box_width // 2 if x == 0 and actual_box_width < inner_width else 0
             center_offset = max(0, center_offset)  # Ensure non-negative
             center_indent = " " * center_offset
             for i, line in enumerate(box_lines):
@@ -891,10 +934,10 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
             if direction in ("down", "up"):
                 arrow_char = ASCII["arrow_d"] if direction == "down" else ASCII["arrow_u"]
                 line_char = ASCII["v"]  # │
-                # Center vertical arrows at width // 2 (same as box center)
+                # Center vertical arrows at inner_width // 2 (same as box center)
                 if x == 0:
-                    # No explicit x position - center at width // 2
-                    center_pos = width // 2
+                    # No explicit x position - center at inner_width // 2
+                    center_pos = inner_width // 2
                     arrow_indent = " " * center_pos
                     if direction == "down":
                         for _ in range(length):
@@ -975,6 +1018,10 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
             table_lines = _ascii_table(headers, rows, box_style)
             for line in table_lines:
                 result.append(indent + line)
+
+    # Wrap in frame if requested
+    if frame:
+        result = _ascii_frame(result, width, padding=1, dashed=True)
 
     return "\n".join(result)
 
@@ -1272,6 +1319,7 @@ def sheets_data(
     # Diagram options (builds diagram with proper alignment via helpers)
     elements: Optional[List[Dict[str, Any]]] = None,
     width: int = 60,
+    frame: bool = False,  # Wrap diagram in dashed border
     ctx: Context = None
 ) -> Dict[str, Any]:
     """
@@ -1768,7 +1816,7 @@ def sheets_data(
 
         # Build diagram from elements (uses helpers for proper alignment)
         if elements:
-            diagram_text = _ascii_diagram(elements, width)
+            diagram_text = _ascii_diagram(elements, width, frame=frame)
             lines = diagram_text.split('\n')
         # Or use raw data as-is
         elif isinstance(data, str):
