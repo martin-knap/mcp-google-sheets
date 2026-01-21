@@ -18,10 +18,6 @@ from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
-# Graph/diagram libraries
-import networkx as nx
-from phart import ASCIIRenderer
-
 # MCP imports
 from mcp.server.fastmcp import FastMCP, Context
 
@@ -438,68 +434,6 @@ def _ascii_frame(content_lines: List[str], width: int = 77, padding: int = 1, da
     result.append(ASCII["bl"] + border + ASCII["br"])
 
     return result
-
-
-def _ascii_flowchart(nodes: List[Dict[str, Any]], edges: List[Tuple[str, str]],
-                     title: str = None, annotations: Dict[str, str] = None) -> str:
-    """
-    Create a flowchart diagram using PHART library.
-
-    Args:
-        nodes: List of node definitions [{"id": "A", "label": "Source 1"}, ...]
-               If only "label" is provided, it's used as both ID and display name.
-        edges: List of edge tuples [("A", "B"), ("B", "C"), ...] using node IDs
-        title: Optional title for the diagram
-        annotations: Optional dict mapping node IDs to annotation text
-
-    Returns:
-        Multi-line string of the rendered flowchart
-    """
-    # Create directed graph
-    G = nx.DiGraph()
-
-    # Build mapping from ID to label (PHART displays node IDs, so we use labels as IDs)
-    id_to_label = {}
-    for node in nodes:
-        node_id = node.get("id", node.get("label", ""))
-        label = node.get("label", node_id)
-        id_to_label[node_id] = label
-        # Add node using label as the node ID (so it displays correctly)
-        G.add_node(label)
-
-    # Add edges (translate IDs to labels)
-    for edge in edges:
-        if len(edge) >= 2:
-            src_label = id_to_label.get(edge[0], edge[0])
-            dst_label = id_to_label.get(edge[1], edge[1])
-            G.add_edge(src_label, dst_label)
-
-    # Render using PHART
-    try:
-        renderer = ASCIIRenderer(G, node_style="square")
-        diagram = renderer.render()
-    except Exception as e:
-        # Fallback to simple rendering
-        diagram = f"[Flowchart rendering error: {e}]"
-
-    result_lines = []
-
-    # Add title if provided
-    if title:
-        result_lines.append(f"  {title}")
-        result_lines.append("")
-
-    # Add the rendered diagram
-    result_lines.extend(diagram.split("\n"))
-
-    # Add annotations if provided (translate IDs to labels for display)
-    if annotations:
-        result_lines.append("")
-        for node_id, annotation in annotations.items():
-            display_name = id_to_label.get(node_id, node_id)
-            result_lines.append(f"  {display_name}: {annotation}")
-
-    return "\n".join(result_lines)
 
 
 def _ascii_comment(text: str) -> str:
@@ -928,7 +862,6 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77, frame: bool 
         {"type": "progress", "value": 75, "max": 100, "width": 20}
         {"type": "shaded_box", "width": 40, "height": 10, "palette": "blocks", "direction": "radial"}
         {"type": "table", "headers": ["A", "B"], "rows": [["1", "2"]], "box_style": "light"}
-        {"type": "flowchart", "nodes": [{"id": "A", "label": "Start"}], "edges": [("A", "B")], "title": "Flow"}
 
     Args:
         elements: List of element dictionaries
@@ -1084,16 +1017,6 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77, frame: bool 
             box_style = elem.get("box_style", "light")
             table_lines = _ascii_table(headers, rows, box_style)
             for line in table_lines:
-                result.append(indent + line)
-
-        elif t == "flowchart":
-            # Render flowchart using PHART library
-            nodes = elem.get("nodes", [])
-            edges = elem.get("edges", [])
-            fc_title = elem.get("title")
-            fc_annotations = elem.get("annotations", {})
-            flowchart_str = _ascii_flowchart(nodes, edges, fc_title, fc_annotations)
-            for line in flowchart_str.split("\n"):
                 result.append(indent + line)
 
     # Wrap in frame if requested
@@ -3424,7 +3347,6 @@ def ascii_diagram(
         progress: Create progress bar
         shaded_box: Create a box with gradient shading fill
         table: Create a bordered data table
-        flowchart: Create flowchart from nodes and edges (uses PHART library)
 
     Args:
         text: Text content for box/title/comment/shaded_box title
@@ -3452,7 +3374,6 @@ def ascii_diagram(
         {"type": "progress", "value": 75, "max": 100, "width": 20}
         {"type": "shaded_box", "width": 40, "height": 10, "palette": "blocks", "direction": "radial"}
         {"type": "table", "headers": ["Col1", "Col2"], "rows": [["A", "B"]], "box_style": "light"}
-        {"type": "flowchart", "nodes": [{"id": "A", "label": "Start"}, {"id": "B", "label": "End"}], "edges": [("A", "B")]}
 
     Shading palettes:
         ascii: " .:-=+*#%@" (classic ASCII art)
@@ -3543,17 +3464,6 @@ def ascii_diagram(
             return {"error": "headers is required for table action"}
         table_lines = _ascii_table(headers, rows or [], box_style)
         return {"lines": table_lines, "text": "\n".join(table_lines)}
-
-    elif action == "flowchart":
-        # Build flowchart from nodes and edges using PHART
-        if not elements:
-            return {"error": "elements is required for flowchart action (list of node dicts with 'id' and 'label')"}
-        if not data:
-            return {"error": "data is required for flowchart action (list of edge tuples like [['A', 'B'], ['B', 'C']])"}
-        # Convert list of lists to tuples
-        edges = [tuple(e) for e in data] if data else []
-        flowchart_text = _ascii_flowchart(elements, edges, text)
-        return {"lines": flowchart_text.split("\n"), "text": flowchart_text}
 
     elif action == "chars":
         # Return available ASCII characters for reference
