@@ -267,8 +267,8 @@ def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int =
         content: Single string or list of strings (lines)
         width: Total box width (auto-calculated if None)
         padding: Internal padding on each side
-        bottom_connector: Add ┴ connector at bottom center (for arrows going out)
-        top_connector: Add ┬ connector at top center (for arrows coming in)
+        bottom_connector: Add ┬ connector at bottom center (arrow exits downward)
+        top_connector: Add ┴ connector at top center (arrow enters from above)
 
     Returns:
         List of strings representing the box
@@ -278,11 +278,11 @@ def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int =
     total_width = inner_width + 2 + (padding * 2)
 
     result = []
-    # Top border (with optional connector)
+    # Top border (with optional connector - ┴ shows arrow entering from above)
     if top_connector:
         half = (total_width - 3) // 2
         remainder = (total_width - 3) - half
-        result.append(ASCII["tl"] + ASCII["h"] * half + ASCII["t_down"] + ASCII["h"] * remainder + ASCII["tr"])
+        result.append(ASCII["tl"] + ASCII["h"] * half + ASCII["t_up"] + ASCII["h"] * remainder + ASCII["tr"])
     else:
         result.append(ASCII["tl"] + ASCII["h"] * (total_width - 2) + ASCII["tr"])
     # Content lines
@@ -290,11 +290,11 @@ def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int =
     for line in lines:
         centered = _ascii_center(line, inner_width)
         result.append(ASCII["v"] + pad + centered + pad + ASCII["v"])
-    # Bottom border (with optional connector)
+    # Bottom border (with optional connector - ┬ shows arrow exiting downward)
     if bottom_connector:
         half = (total_width - 3) // 2
         remainder = (total_width - 3) - half
-        result.append(ASCII["bl"] + ASCII["h"] * half + ASCII["t_up"] + ASCII["h"] * remainder + ASCII["br"])
+        result.append(ASCII["bl"] + ASCII["h"] * half + ASCII["t_down"] + ASCII["h"] * remainder + ASCII["br"])
     else:
         result.append(ASCII["bl"] + ASCII["h"] * (total_width - 2) + ASCII["br"])
     return result
