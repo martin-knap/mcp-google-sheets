@@ -362,12 +362,11 @@ def _ascii_box_row(boxes: List[Dict[str, Any]], spacing: int = 4, merge_bottom: 
             merge_line2[i] = ASCII["h"]
         merge_line2[left_center] = ASCII["bl"]
         merge_line2[right_center] = ASCII["br"]
-        # Add T-connectors for middle boxes
-        for center in box_centers[1:-1]:
-            if center < total_width:
-                merge_line2[center] = ASCII["t_up"]
-        # Add down connector in the middle
-        mid = (left_center + right_center) // 2
+        # Determine the down connector position - use row center for alignment
+        mid = total_width // 2
+
+        # Middle boxes just merge into the horizontal line (no t_up connectors)
+        # This creates a cleaner look: ──┼── at center instead of ┴┬
         merge_line2[mid] = ASCII["t_down"]
         result.append("".join(merge_line2))
 
@@ -904,8 +903,24 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77, frame: bool 
         elif t == "box":
             box_width = elem.get("width")
             lines = elem.get("lines", [elem.get("text", "")])
-            # Use regular box corners - visual alignment creates connection
-            box_lines = _ascii_box(lines, box_width)
+
+            # Check for explicit connector settings or auto-detect from context
+            bottom_conn = elem.get("bottom_connector", False)
+            top_conn = elem.get("top_connector", False)
+
+            # Auto-detect: if next element is a down arrow, add bottom connector
+            if idx + 1 < len(elements):
+                next_elem = elements[idx + 1]
+                if next_elem.get("type") == "arrow" and next_elem.get("direction", "down") == "down":
+                    bottom_conn = True
+
+            # Auto-detect: if previous element was a down arrow, add top connector (arrow coming in)
+            if idx > 0:
+                prev_elem = elements[idx - 1]
+                if prev_elem.get("type") == "arrow" and prev_elem.get("direction", "down") == "down":
+                    top_conn = True
+
+            box_lines = _ascii_box(lines, box_width, bottom_connector=bottom_conn, top_connector=top_conn)
             middle_idx = len(box_lines) // 2  # Middle line (where content is)
             # Calculate centering: place box so its center aligns with inner_width // 2
             actual_box_width = len(box_lines[0]) if box_lines else 0
