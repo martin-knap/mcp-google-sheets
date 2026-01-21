@@ -864,10 +864,12 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
                                    bottom_connector=next_is_down_arrow,
                                    top_connector=prev_was_down_arrow)
             middle_idx = len(box_lines) // 2  # Middle line (where content is)
-            # Calculate centering offset if no explicit x position
+            # Calculate centering: place box so its center aligns with width // 2
             actual_box_width = len(box_lines[0]) if box_lines else 0
-            center_offset = (width - actual_box_width) // 2 if x == 0 and actual_box_width < width else 0
-            center_indent = " " * center_offset if center_offset > 0 else ""
+            center_pos = width // 2
+            center_offset = center_pos - actual_box_width // 2 if x == 0 and actual_box_width < width else 0
+            center_offset = max(0, center_offset)  # Ensure non-negative
+            center_indent = " " * center_offset
             for i, line in enumerate(box_lines):
                 full_line = (center_indent if x == 0 else indent) + line
                 if comment_str and i == middle_idx:
@@ -889,17 +891,19 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
             if direction in ("down", "up"):
                 arrow_char = ASCII["arrow_d"] if direction == "down" else ASCII["arrow_u"]
                 line_char = ASCII["v"]  # │
-                # Center vertical arrows within the diagram width (respecting indent)
+                # Center vertical arrows at width // 2 (same as box center)
                 if x == 0:
-                    # No explicit x position - center within width
+                    # No explicit x position - center at width // 2
+                    center_pos = width // 2
+                    arrow_indent = " " * center_pos
                     if direction == "down":
                         for _ in range(length):
-                            result.append(_ascii_center(line_char, width))
-                        result.append(_ascii_center(arrow_char, width))
+                            result.append(arrow_indent + line_char)
+                        result.append(arrow_indent + arrow_char)
                     else:  # up
-                        result.append(_ascii_center(arrow_char, width))
+                        result.append(arrow_indent + arrow_char)
                         for _ in range(length):
-                            result.append(_ascii_center(line_char, width))
+                            result.append(arrow_indent + line_char)
                 else:
                     if direction == "down":
                         for _ in range(length):
