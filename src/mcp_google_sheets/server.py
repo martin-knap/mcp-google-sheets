@@ -258,7 +258,8 @@ def _ascii_center(text: str, width: int) -> str:
     return " " * left + text + " " * right
 
 
-def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int = 1) -> List[str]:
+def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int = 1,
+               bottom_connector: bool = False, top_connector: bool = False) -> List[str]:
     """
     Create a box around content.
 
@@ -266,6 +267,8 @@ def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int =
         content: Single string or list of strings (lines)
         width: Total box width (auto-calculated if None)
         padding: Internal padding on each side
+        bottom_connector: Add ┴ connector at bottom center (for arrows going out)
+        top_connector: Add ┬ connector at top center (for arrows coming in)
 
     Returns:
         List of strings representing the box
@@ -275,15 +278,104 @@ def _ascii_box(content: Union[str, List[str]], width: int = None, padding: int =
     total_width = inner_width + 2 + (padding * 2)
 
     result = []
-    # Top border
-    result.append(ASCII["tl"] + ASCII["h"] * (total_width - 2) + ASCII["tr"])
+    # Top border (with optional connector)
+    if top_connector:
+        half = (total_width - 3) // 2
+        remainder = (total_width - 3) - half
+        result.append(ASCII["tl"] + ASCII["h"] * half + ASCII["t_down"] + ASCII["h"] * remainder + ASCII["tr"])
+    else:
+        result.append(ASCII["tl"] + ASCII["h"] * (total_width - 2) + ASCII["tr"])
     # Content lines
     pad = " " * padding
     for line in lines:
         centered = _ascii_center(line, inner_width)
         result.append(ASCII["v"] + pad + centered + pad + ASCII["v"])
-    # Bottom border
-    result.append(ASCII["bl"] + ASCII["h"] * (total_width - 2) + ASCII["br"])
+    # Bottom border (with optional connector)
+    if bottom_connector:
+        half = (total_width - 3) // 2
+        remainder = (total_width - 3) - half
+        result.append(ASCII["bl"] + ASCII["h"] * half + ASCII["t_up"] + ASCII["h"] * remainder + ASCII["br"])
+    else:
+        result.append(ASCII["bl"] + ASCII["h"] * (total_width - 2) + ASCII["br"])
+    return result
+
+
+def _ascii_box_row(boxes: List[Dict[str, Any]], spacing: int = 2, merge_bottom: bool = False) -> List[str]:
+    """
+    Create multiple boxes side by side.
+
+    Args:
+        boxes: List of box definitions with "text" or "lines"
+        spacing: Space between boxes
+        merge_bottom: Add merge connector lines below boxes
+
+    Returns:
+        List of strings representing the row of boxes
+    """
+    # Render each box
+    rendered_boxes = []
+    for box_def in boxes:
+        content = box_def.get("lines", [box_def.get("text", "")])
+        box_lines = _ascii_box(content, bottom_connector=merge_bottom)
+        rendered_boxes.append(box_lines)
+
+    # Find max height
+    max_height = max(len(b) for b in rendered_boxes)
+
+    # Pad boxes to same height
+    for i, box in enumerate(rendered_boxes):
+        while len(box) < max_height:
+            box.insert(-1, ASCII["v"] + " " * (len(box[0]) - 2) + ASCII["v"])
+
+    # Combine horizontally
+    result = []
+    spacer = " " * spacing
+    for row_idx in range(max_height):
+        row_parts = [box[row_idx] for box in rendered_boxes]
+        result.append(spacer.join(row_parts))
+
+    # Add merge lines if requested
+    if merge_bottom and len(rendered_boxes) > 1:
+        # Calculate positions for merge connectors
+        box_centers = []
+        pos = 0
+        for box in rendered_boxes:
+            box_width = len(box[0])
+            box_centers.append(pos + box_width // 2)
+            pos += box_width + spacing
+
+        # Create merge lines
+        total_width = pos - spacing
+
+        # Vertical lines down from each box
+        merge_line1 = [" "] * total_width
+        for center in box_centers:
+            if center < total_width:
+                merge_line1[center] = ASCII["v"]
+        result.append("".join(merge_line1))
+
+        # Horizontal connector line
+        merge_line2 = [" "] * total_width
+        left_center = box_centers[0]
+        right_center = box_centers[-1]
+        for i in range(left_center, right_center + 1):
+            merge_line2[i] = ASCII["h"]
+        merge_line2[left_center] = ASCII["bl"]
+        merge_line2[right_center] = ASCII["br"]
+        # Add T-connectors for middle boxes
+        for center in box_centers[1:-1]:
+            if center < total_width:
+                merge_line2[center] = ASCII["t_up"]
+        # Add down connector in the middle
+        mid = (left_center + right_center) // 2
+        merge_line2[mid] = ASCII["t_down"]
+        result.append("".join(merge_line2))
+
+        # Vertical line down from center
+        center_line = [" "] * total_width
+        center_line[mid] = ASCII["v"]
+        result.append("".join(center_line))
+
     return result
 
 
@@ -711,10 +803,11 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
 
     Elements can be:
         {"type": "title", "text": "TITLE"}
-        {"type": "box", "text": "Content", "x": 4}  # x = indent
+        {"type": "box", "text": "Content", "x": 4, "comment": "← annotation"}
         {"type": "box", "lines": ["Line1", "Line2"], "x": 4}
+        {"type": "row", "boxes": [{"text": "A"}, {"text": "B"}], "merge": true}
         {"type": "line", "text": "───────►"}
-        {"type": "arrow", "direction": "down"}
+        {"type": "arrow", "direction": "down", "length": 2}
         {"type": "text", "text": "Raw text", "comment": "Optional comment"}
         {"type": "spacer"}
         {"type": "bar_chart", "data": [("Label", 100), ("Label2", 50)], "bar_width": 20}
@@ -728,21 +821,48 @@ def _ascii_diagram(elements: List[Dict[str, Any]], width: int = 77) -> str:
     """
     result = []
 
-    for elem in elements:
+    # Use index-based iteration for lookahead
+    for idx, elem in enumerate(elements):
         t = elem.get("type", "text")
         x = elem.get("x", 0)  # indent
         indent = " " * x
         comment = elem.get("comment", "")
         comment_str = _ascii_comment(comment) if comment else ""
 
+        # Check if next element is a down arrow (for connector)
+        next_is_down_arrow = (idx + 1 < len(elements) and
+                              elements[idx + 1].get("type") == "arrow" and
+                              elements[idx + 1].get("direction", "down") == "down")
+        # Check if previous element was a down arrow (for top connector)
+        prev_was_down_arrow = (idx > 0 and
+                               elements[idx - 1].get("type") == "arrow" and
+                               elements[idx - 1].get("direction", "down") == "down")
+
         if t == "title":
             for line in _ascii_title_box(elem["text"], width):
                 result.append(line)
 
+        elif t == "row":
+            # Horizontal row of boxes
+            boxes = elem.get("boxes", [])
+            merge = elem.get("merge", False)
+            spacing = elem.get("spacing", 2)
+            row_lines = _ascii_box_row(boxes, spacing=spacing, merge_bottom=merge)
+            # Center the row
+            if row_lines:
+                row_width = len(row_lines[0])
+                row_offset = (width - row_width) // 2 if row_width < width else 0
+                row_indent = " " * row_offset
+                for line in row_lines:
+                    result.append(row_indent + line)
+
         elif t == "box":
             box_width = elem.get("width")
             lines = elem.get("lines", [elem.get("text", "")])
-            box_lines = _ascii_box(lines, box_width)
+            # Add connectors when arrows are adjacent
+            box_lines = _ascii_box(lines, box_width,
+                                   bottom_connector=next_is_down_arrow,
+                                   top_connector=prev_was_down_arrow)
             middle_idx = len(box_lines) // 2  # Middle line (where content is)
             # Calculate centering offset if no explicit x position
             actual_box_width = len(box_lines[0]) if box_lines else 0
