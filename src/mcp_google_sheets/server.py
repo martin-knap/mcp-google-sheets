@@ -314,11 +314,22 @@ def _ascii_box_row(boxes: List[Dict[str, Any]], spacing: int = 4, merge_bottom: 
     Returns:
         List of strings representing the row of boxes
     """
-    # Render each box (no connectors - regular corners)
-    rendered_boxes = []
+    # First pass: determine the widest content to normalize box widths
+    contents = []
+    max_content_width = 0
     for box_def in boxes:
         content = box_def.get("lines", [box_def.get("text", "")])
-        box_lines = _ascii_box(content)
+        if isinstance(content, str):
+            content = [content]
+        contents.append(content)
+        content_width = max(len(line) for line in content)
+        max_content_width = max(max_content_width, content_width)
+
+    # Render each box with normalized width (all same size)
+    box_width = max_content_width + 4  # content + 2 padding + 2 borders
+    rendered_boxes = []
+    for content in contents:
+        box_lines = _ascii_box(content, width=box_width)
         rendered_boxes.append(box_lines)
 
     # Find max height
