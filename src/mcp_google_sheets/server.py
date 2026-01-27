@@ -1709,10 +1709,16 @@ def sheets_structure(
         delete_rows: Delete rows
         delete_cols: Delete columns
         table: Convert range to native Google Sheets Table (Format > Convert to Table)
-        validate: Add data validation (dropdown, number range, date, checkbox, custom)
+        validate: Add data validation (dropdown, dropdown_chips, number range, date, checkbox, custom)
 
     Table styles (via validation param): "table" (default), "table_green", "table_gray", "table_red"
     Or pass custom table name: validation="MyTableName"
+
+    Dropdown types:
+        - "dropdown": Standard data validation dropdown (plain text)
+        - "dropdown_chips": Colored pill/chip dropdown (native table feature). Use for status fields
+          like "To Review", "Done", "In Progress" etc. Looks great for status/category columns!
+          REQUIRES the data to be in a native table (use style="table" when writing data).
 
     IMPORTANT - table action requirements:
         - First row of range MUST be column headers (not a title or merged content)
@@ -1752,6 +1758,10 @@ def sheets_structure(
 
         # Add checkbox
         sheets_structure(id, "Sheet1", "validate", range="F2:F100", validation="checkbox")
+
+        # Add colored pill/chip dropdown for status columns (requires native table)
+        sheets_structure(id, "Sheet1", "validate", range="F2:F100", validation="dropdown_chips",
+                        options=["To Review", "In Progress", "Done", "Blocked"])
     """
     sheets_service = ctx.request_context.lifespan_context.sheets_service
     sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
@@ -1990,7 +2000,65 @@ def sheets_structure(
 
         rule = {"showCustomUi": True, "strict": not allow_invalid}
 
-        if validation == "dropdown":
+        if validation == "dropdown_chips":
+            # Native table dropdown with colored pill/chip UI
+            # Requires the range to be within a native Google Sheets table
+            if not options:
+                return {"error": "options are required for dropdown_chips validation"}
+
+            # Fetch spreadsheet to find the table containing this range
+            sp = sheets_service.spreadsheets().get(
+                spreadsheetId=spreadsheet_id,
+                includeGridData=False
+            ).execute()
+
+            # Find the sheet and its tables
+            target_table = None
+            for s in sp.get("sheets", []):
+                if s["properties"]["sheetId"] == sheet_id:
+                    for tbl in s.get("tables", []):
+                        target_table = tbl
+                        break
+                    break
+
+            if not target_table:
+                return {"error": "No native table found in this sheet. Use style='table' when writing data to create one first."}
+
+            # Determine column index from range (e.g., "F2:F29" → column F)
+            start_row, end_row, start_col, end_col = _parse_a1(range)
+            table_range = target_table.get("range", {})
+            table_start_col = table_range.get("startColumnIndex", 0)
+            col_index_in_table = start_col - table_start_col
+
+            # Build updateTable request to set column as DROPDOWN type
+            update_request = {
+                "updateTable": {
+                    "table": {
+                        "name": target_table["name"],
+                        "columnProperties": [
+                            {
+                                "columnIndex": col_index_in_table,
+                                "columnType": "DROPDOWN",
+                                "dataValidationRule": {
+                                    "condition": {
+                                        "type": "ONE_OF_LIST",
+                                        "values": [{"userEnteredValue": opt} for opt in options]
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                    "fields": "columnProperties.columnType,columnProperties.dataValidationRule"
+                }
+            }
+
+            result = sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": [update_request]}
+            ).execute()
+            return {'validation_added': range, 'type': 'dropdown_chips', 'table': target_table["name"], 'column_index': col_index_in_table}
+
+        elif validation == "dropdown":
             if not options:
                 return {"error": "options are required for dropdown validation"}
             rule["condition"] = {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": opt} for opt in options]}
