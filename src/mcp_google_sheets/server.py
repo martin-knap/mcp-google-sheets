@@ -2031,10 +2031,13 @@ def sheets_structure(
             col_index_in_table = start_col - table_start_col
 
             # Build updateTable request to set column as DROPDOWN type
+            table_id = target_table.get("tableId", "")
+            table_name = target_table.get("name", "")
+
             update_request = {
                 "updateTable": {
                     "table": {
-                        "name": target_table["name"],
+                        "tableId": table_id,
                         "columnProperties": [
                             {
                                 "columnIndex": col_index_in_table,
@@ -2056,7 +2059,7 @@ def sheets_structure(
                 spreadsheetId=spreadsheet_id,
                 body={"requests": [update_request]}
             ).execute()
-            return {'validation_added': range, 'type': 'dropdown_chips', 'table': target_table["name"], 'column_index': col_index_in_table}
+            return {'validation_added': range, 'type': 'dropdown_chips', 'table': table_name, 'table_id': table_id, 'column_index': col_index_in_table}
 
         elif validation == "dropdown":
             if not options:
