@@ -1710,6 +1710,7 @@ def sheets_structure(
         delete_cols: Delete columns
         table: Convert range to native Google Sheets Table (Format > Convert to Table)
         validate: Add data validation (dropdown, dropdown_chips, number range, date, checkbox, custom)
+        inspect: Return table metadata (column types, dropdown options, colors, validation rules)
 
     Table styles (via validation param): "table" (default), "table_green", "table_gray", "table_red"
     Or pass custom table name: validation="MyTableName"
@@ -2107,6 +2108,27 @@ def sheets_structure(
             body={"requests": [{"setDataValidation": {"range": _grid_range(sheet_id, range), "rule": rule}}]}
         ).execute()
         return {'validation_added': range, 'type': validation}
+
+    # === INSPECT ===
+    elif action == "inspect":
+        # Return table metadata including column types, dropdown options, and colors
+        sp = sheets_service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            includeGridData=False
+        ).execute()
+
+        result = {"sheet": sheet, "tables": []}
+        for s in sp.get("sheets", []):
+            if s["properties"]["sheetId"] == sheet_id:
+                result["sheet_properties"] = s["properties"]
+                for tbl in s.get("tables", []):
+                    result["tables"].append(tbl)
+                break
+
+        if not result["tables"]:
+            result["message"] = "No native tables found in this sheet"
+
+        return result
 
     return {"error": f"Unknown action: {action}"}
 
