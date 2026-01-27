@@ -2025,6 +2025,10 @@ def sheets_structure(
             if not target_table:
                 return {"error": "No native table found in this sheet. Use style='table' when writing data to create one first."}
 
+            # Debug: if options contains exactly ["__debug__"], return table metadata
+            if options == ["__debug__"]:
+                return {"debug_table": target_table}
+
             # Determine column index from range (e.g., "F2:F29" → column F)
             start_row, end_row, start_col, end_col = _parse_a1(range)
             table_range = target_table.get("range", {})
