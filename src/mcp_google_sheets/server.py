@@ -2111,11 +2111,13 @@ def sheets_structure(
 
     # === INSPECT ===
     elif action == "inspect":
-        # Return table metadata including column types, dropdown options, and colors
-        sp = sheets_service.spreadsheets().get(
-            spreadsheetId=spreadsheet_id,
-            includeGridData=False
-        ).execute()
+        # Return table metadata and optionally cell-level data validation for a range
+        include_cells = range is not None
+        params = {"spreadsheetId": spreadsheet_id, "includeGridData": include_cells}
+        if include_cells:
+            params["ranges"] = [f"'{sheet}'!{range}"]
+
+        sp = sheets_service.spreadsheets().get(**params).execute()
 
         result = {"sheet": sheet, "tables": []}
         for s in sp.get("sheets", []):
@@ -2123,6 +2125,24 @@ def sheets_structure(
                 result["sheet_properties"] = s["properties"]
                 for tbl in s.get("tables", []):
                     result["tables"].append(tbl)
+                # Include cell-level data validation if range was specified
+                if include_cells and "data" in s:
+                    cells_info = []
+                    for grid_data in s["data"]:
+                        for ri, row in enumerate(grid_data.get("rowData", [])):
+                            for ci, cell in enumerate(row.get("values", [])):
+                                cell_info = {"row": ri, "col": ci}
+                                if "dataValidation" in cell:
+                                    cell_info["dataValidation"] = cell["dataValidation"]
+                                if "effectiveFormat" in cell:
+                                    fmt = cell["effectiveFormat"]
+                                    if "textFormat" in fmt:
+                                        cell_info["textFormat"] = fmt["textFormat"]
+                                if "formattedValue" in cell:
+                                    cell_info["value"] = cell["formattedValue"]
+                                if len(cell_info) > 2:  # Only include cells with interesting data
+                                    cells_info.append(cell_info)
+                    result["cells"] = cells_info
                 break
 
         if not result["tables"]:
