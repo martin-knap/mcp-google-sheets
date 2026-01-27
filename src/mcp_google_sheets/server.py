@@ -2125,23 +2125,14 @@ def sheets_structure(
                 result["sheet_properties"] = s["properties"]
                 for tbl in s.get("tables", []):
                     result["tables"].append(tbl)
-                # Include cell-level data validation if range was specified
+                # Include raw cell data if range was specified
                 if include_cells and "data" in s:
                     cells_info = []
                     for grid_data in s["data"]:
                         for ri, row in enumerate(grid_data.get("rowData", [])):
                             for ci, cell in enumerate(row.get("values", [])):
-                                cell_info = {"row": ri, "col": ci}
-                                if "dataValidation" in cell:
-                                    cell_info["dataValidation"] = cell["dataValidation"]
-                                if "effectiveFormat" in cell:
-                                    fmt = cell["effectiveFormat"]
-                                    if "textFormat" in fmt:
-                                        cell_info["textFormat"] = fmt["textFormat"]
-                                if "formattedValue" in cell:
-                                    cell_info["value"] = cell["formattedValue"]
-                                if len(cell_info) > 2:  # Only include cells with interesting data
-                                    cells_info.append(cell_info)
+                                if cell:  # dump full raw cell
+                                    cells_info.append({"row": ri, "col": ci, "raw": cell})
                     result["cells"] = cells_info
                 break
 
