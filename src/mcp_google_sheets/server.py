@@ -2030,26 +2030,36 @@ def sheets_structure(
             table_start_col = table_range.get("startColumnIndex", 0)
             col_index_in_table = start_col - table_start_col
 
+            # Get existing column name from table metadata
+            existing_columns = target_table.get("columnProperties", [])
+            col_name = None
+            for col in existing_columns:
+                if col.get("columnIndex") == col_index_in_table:
+                    col_name = col.get("columnName")
+                    break
+
             # Build updateTable request to set column as DROPDOWN type
             table_id = target_table.get("tableId", "")
             table_name = target_table.get("name", "")
+
+            col_props = {
+                "columnIndex": col_index_in_table,
+                "columnType": "DROPDOWN",
+                "dataValidationRule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [{"userEnteredValue": opt} for opt in options]
+                    }
+                }
+            }
+            if col_name:
+                col_props["columnName"] = col_name
 
             update_request = {
                 "updateTable": {
                     "table": {
                         "tableId": table_id,
-                        "columnProperties": [
-                            {
-                                "columnIndex": col_index_in_table,
-                                "columnType": "DROPDOWN",
-                                "dataValidationRule": {
-                                    "condition": {
-                                        "type": "ONE_OF_LIST",
-                                        "values": [{"userEnteredValue": opt} for opt in options]
-                                    }
-                                }
-                            }
-                        ]
+                        "columnProperties": [col_props]
                     },
                     "fields": "columnProperties.columnType,columnProperties.dataValidationRule"
                 }
