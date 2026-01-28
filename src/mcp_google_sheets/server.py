@@ -2025,9 +2025,25 @@ def sheets_structure(
             if not target_table:
                 return {"error": "No native table found in this sheet. Use style='table' when writing data to create one first."}
 
-            # Debug: if options contains exactly ["__debug__"], return table metadata
-            if options == ["__debug__"]:
-                return {"debug_table": target_table}
+            # Debug modes
+            if options and options[0].startswith("__debug"):
+                if options[0] == "__debug__":
+                    return {"debug_table": target_table}
+                if options[0] == "__debug_cells__":
+                    sp_full = sheets_service.spreadsheets().get(
+                        spreadsheetId=spreadsheet_id,
+                        includeGridData=True,
+                        ranges=[f"'{sheet}'!{range}"]
+                    ).execute()
+                    grid_data = sp_full["sheets"][0].get("data", [{}])[0]
+                    rows = grid_data.get("rowData", [])
+                    cells_info = []
+                    for r_idx, row in enumerate(rows[:3]):
+                        for c_idx, cell in enumerate(row.get("values", [])):
+                            dv = cell.get("dataValidation")
+                            if dv:
+                                cells_info.append({"row": r_idx, "col": c_idx, "dataValidation": dv})
+                    return {"debug_cells": cells_info}
 
             # Determine column index from range (e.g., "F2:F29" → column F)
             start_row, end_row, start_col, end_col = _parse_a1(range)
