@@ -3130,6 +3130,7 @@ def slides_manage(
     page_id: str = None,
     master_id: str = None,
     thumbnail_size: str = "MEDIUM",
+    source_url: str = None,
     ctx: Context = None,
 ) -> Dict[str, Any]:
     """
@@ -3137,6 +3138,7 @@ def slides_manage(
 
     Actions:
         create: Create a new presentation
+        copy: Copy an existing presentation (preserves theme/style). Use presentation_id or source_url.
         get: Get presentation details including slide text content
         list: List presentations in Drive
         get_page: Get details about a specific slide
@@ -3155,6 +3157,38 @@ def slides_manage(
             "presentation_id": created_id,
             "title": presentation.get("title", title),
             "url": _presentation_url(created_id),
+        }
+
+    if action == "copy":
+        # Resolve source ID from URL or presentation_id
+        source_id = presentation_id
+        if source_url:
+            import re as _re
+            m = _re.search(r'/presentation/d/([a-zA-Z0-9_-]+)', source_url)
+            if m:
+                source_id = m.group(1)
+            else:
+                return {"error": "Could not parse presentation ID from source_url"}
+        if not source_id:
+            return {"error": "presentation_id or source_url is required for copy action"}
+
+        copy_title = title if title != "Untitled Presentation" else None
+        body = {}
+        if copy_title:
+            body["name"] = copy_title
+
+        result = drive_service.files().copy(
+            fileId=source_id,
+            supportsAllDrives=True,
+            body=body,
+            fields="id,name,webViewLink",
+        ).execute()
+        new_id = result["id"]
+        return {
+            "presentation_id": new_id,
+            "title": result.get("name"),
+            "source_presentation_id": source_id,
+            "url": result.get("webViewLink") or _presentation_url(new_id),
         }
 
     if action == "list":
@@ -3760,10 +3794,16 @@ def slides_update(
         if not notes_object_id:
             return {"error": f"speaker notes shape not found for slide: {slide_id}"}
 
-        update_requests = [
-            {"deleteText": {"objectId": notes_object_id, "textRange": {"type": "ALL"}}},
-            {"insertText": {"objectId": notes_object_id, "insertionIndex": 0, "text": text}},
-        ]
+        has_notes_text = False
+        for el in slide.get("slideProperties", {}).get("notesPage", {}).get("pageElements", []):
+            if el.get("objectId") == notes_object_id:
+                has_notes_text = bool(el.get("shape", {}).get("text", {}).get("textElements"))
+                break
+
+        update_requests = []
+        if has_notes_text:
+            update_requests.append({"deleteText": {"objectId": notes_object_id, "textRange": {"type": "ALL"}}})
+        update_requests.append({"insertText": {"objectId": notes_object_id, "insertionIndex": 0, "text": text}})
         result = slides_service.presentations().batchUpdate(
             presentationId=presentation_id,
             body={"requests": update_requests},
