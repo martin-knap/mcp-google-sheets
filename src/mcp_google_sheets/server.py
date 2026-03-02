@@ -14,12 +14,11 @@ import time
 from typing import List, Dict, Any, Optional, Tuple, Union
 from enum import Enum
 import json
-from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 # MCP imports
-from mcp.server.fastmcp import FastMCP, Context
+from fastmcp import FastMCP, Context
 
 # Google API imports
 from google.oauth2.credentials import Credentials
@@ -30,7 +29,11 @@ from googleapiclient.discovery import build
 import google.auth
 
 # Constants
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/presentations',
+]
 CREDENTIALS_CONFIG = os.environ.get('CREDENTIALS_CONFIG')
 TOKEN_PATH = os.environ.get('TOKEN_PATH', 'token.json')
 CREDENTIALS_PATH = os.environ.get('CREDENTIALS_PATH', 'credentials.json')
@@ -743,15 +746,8 @@ def _parse_column_range(col_spec: str) -> List[int]:
 # LIFESPAN & SERVER SETUP
 # =============================================================================
 
-@dataclass
-class SpreadsheetContext:
-    sheets_service: Any
-    drive_service: Any
-    folder_id: Optional[str] = None
-
-
 @asynccontextmanager
-async def spreadsheet_lifespan(server: FastMCP) -> AsyncIterator[SpreadsheetContext]:
+async def spreadsheet_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     """Manage Google API connection lifecycle"""
     creds = None
 
@@ -796,25 +792,21 @@ async def spreadsheet_lifespan(server: FastMCP) -> AsyncIterator[SpreadsheetCont
 
     sheets_service = build('sheets', 'v4', credentials=creds)
     drive_service = build('drive', 'v3', credentials=creds)
+    slides_service = build('slides', 'v1', credentials=creds)
 
     try:
-        yield SpreadsheetContext(
-            sheets_service=sheets_service,
-            drive_service=drive_service,
-            folder_id=DRIVE_FOLDER_ID or None
-        )
+        yield {
+            "sheets_service": sheets_service,
+            "drive_service": drive_service,
+            "slides_service": slides_service,
+            "folder_id": DRIVE_FOLDER_ID or None,
+        }
     finally:
         pass
 
 
-_host = os.environ.get('HOST') or os.environ.get('FASTMCP_HOST') or "0.0.0.0"
-_port = int(os.environ.get('PORT') or os.environ.get('FASTMCP_PORT') or "8000")
+mcp = FastMCP("Google Spreadsheet", lifespan=spreadsheet_lifespan)
 
-mcp = FastMCP("Google Spreadsheet",
-              dependencies=["google-auth", "google-auth-oauthlib", "google-api-python-client"],
-              lifespan=spreadsheet_lifespan,
-              host=_host,
-              port=_port)
 
 
 # =============================================================================
@@ -915,7 +907,7 @@ def sheets_data(
         # Create ASCII diagram with raw text (use style="clean" to hide gridlines)
         sheets_data(id, "Sheet1", "diagram", "A1", data="┌───────┐\\n│  API  │\\n└───┬───┘\\n    │\\n    ▼\\n┌───────┐\\n│  DB   │\\n└───────┘", style="clean")
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service = ctx.lifespan_context["sheets_service"]
     action = action.lower()
 
     # === READ ===
@@ -1458,7 +1450,7 @@ def sheets_format(
         # Batch formatting
         sheets_format(id, "Sheet1", "style", "A1", formats=[{"range": "A1:F1", "style": "header"}, {"range": "B2:B100", "number_format": "currency"}])
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service = ctx.lifespan_context["sheets_service"]
     sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
     action = action.lower()
 
@@ -1764,7 +1756,7 @@ def sheets_structure(
         sheets_structure(id, "Sheet1", "validate", range="F2:F100", validation="dropdown_chips",
                         options=["To Review", "In Progress", "Done", "Blocked"])
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service = ctx.lifespan_context["sheets_service"]
     sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
     action = action.lower()
 
@@ -2246,7 +2238,7 @@ def sheets_visualize(
         # Add sparkline
         sheets_visualize(id, "Sheet1", "sparkline", sparkline_type="line", sparkline_range="B2:M2", target_cell="N2")
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service = ctx.lifespan_context["sheets_service"]
     sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
     action = action.lower()
 
@@ -2631,7 +2623,7 @@ def sheets_manage(
         # Duplicate sheet
         sheets_manage(id, "duplicate", sheet="Template", new_name="January")
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service = ctx.lifespan_context["sheets_service"]
     action = action.lower()
 
     # === LIST ===
@@ -2782,9 +2774,9 @@ def drive(
         # Get summary of multiple spreadsheets
         drive("summary", spreadsheet_ids=["id1", "id2"], preview_rows=3)
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
-    drive_service = ctx.request_context.lifespan_context.drive_service
-    default_folder = ctx.request_context.lifespan_context.folder_id
+    sheets_service = ctx.lifespan_context["sheets_service"]
+    drive_service = ctx.lifespan_context["drive_service"]
+    default_folder = ctx.lifespan_context["folder_id"]
     action = action.lower()
 
     # === CREATE ===
@@ -3059,6 +3051,1149 @@ def ascii_diagram(
     return {"error": f"Unknown action: {action}"}
 
 
+# =============================================================================
+# GOOGLE SLIDES
+# =============================================================================
+
+def _pt_to_emu(value: float) -> int:
+    """Convert point units to EMU (1pt = 12700 EMU)."""
+    return int(round(value * 12700))
+
+
+def _presentation_url(presentation_id: str) -> str:
+    return f"https://docs.google.com/presentation/d/{presentation_id}/edit"
+
+
+def _extract_slide_text(page_elements: List[Dict[str, Any]]) -> List[str]:
+    """Extract text snippets from slide elements."""
+    texts: List[str] = []
+    for element in page_elements or []:
+        shape = element.get("shape", {})
+        text_runs = shape.get("text", {}).get("textElements", [])
+        chunks: List[str] = []
+        for run in text_runs:
+            run_content = run.get("textRun", {}).get("content")
+            if run_content:
+                cleaned = run_content.strip()
+                if cleaned:
+                    chunks.append(cleaned)
+        if chunks:
+            texts.append(" ".join(chunks))
+    return texts
+
+
+def _build_text_range(
+    text_range: str = "ALL",
+    text_start_index: Optional[int] = None,
+    text_end_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Build Slides API textRange object."""
+    range_type = (text_range or "ALL").upper()
+    if range_type == "FIXED_RANGE":
+        if text_start_index is None or text_end_index is None:
+            raise ValueError("text_start_index and text_end_index are required for FIXED_RANGE")
+        return {"type": "FIXED_RANGE", "startIndex": text_start_index, "endIndex": text_end_index}
+    if range_type in {"ALL", "FROM_START_INDEX"}:
+        result: Dict[str, Any] = {"type": range_type}
+        if range_type == "FROM_START_INDEX":
+            if text_start_index is None:
+                raise ValueError("text_start_index is required for FROM_START_INDEX")
+            result["startIndex"] = text_start_index
+        return result
+    raise ValueError("text_range must be one of ALL, FIXED_RANGE, FROM_START_INDEX")
+
+
+def _find_page_element(presentation: Dict[str, Any], object_id: str) -> Optional[Dict[str, Any]]:
+    """Find a page element by object ID across slides."""
+    for slide in presentation.get("slides", []):
+        for element in slide.get("pageElements", []):
+            if element.get("objectId") == object_id:
+                return element
+    return None
+
+
+def _speaker_notes_object_id(slide: Dict[str, Any]) -> Optional[str]:
+    """Extract speaker notes shape ID for a slide."""
+    return (
+        slide.get("slideProperties", {})
+        .get("notesPage", {})
+        .get("notesProperties", {})
+        .get("speakerNotesObjectId")
+    )
+
+
+@mcp.tool()
+def slides_manage(
+    action: str,
+    presentation_id: str = None,
+    title: str = "Untitled Presentation",
+    page_id: str = None,
+    master_id: str = None,
+    thumbnail_size: str = "MEDIUM",
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Manage Google Slides presentations (read + create operations).
+
+    Actions:
+        create: Create a new presentation
+        get: Get presentation details including slide text content
+        list: List presentations in Drive
+        get_page: Get details about a specific slide
+        thumbnail: Generate a slide thumbnail URL
+        get_masters: Get available master slide IDs and names
+        get_layouts: Get available layout IDs (optionally filtered by master_id)
+    """
+    slides_service = ctx.lifespan_context["slides_service"]
+    drive_service = ctx.lifespan_context["drive_service"]
+    action = action.lower()
+
+    if action == "create":
+        presentation = slides_service.presentations().create(body={"title": title}).execute()
+        created_id = presentation.get("presentationId")
+        return {
+            "presentation_id": created_id,
+            "title": presentation.get("title", title),
+            "url": _presentation_url(created_id),
+        }
+
+    if action == "list":
+        result = drive_service.files().list(
+            q="mimeType='application/vnd.google-apps.presentation'",
+            spaces="drive",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            fields="files(id,name,modifiedTime,webViewLink)",
+            orderBy="modifiedTime desc",
+        ).execute()
+        return {
+            "presentations": [
+                {
+                    "presentation_id": item["id"],
+                    "title": item["name"],
+                    "modified": item.get("modifiedTime"),
+                    "url": item.get("webViewLink")
+                    or _presentation_url(item["id"]),
+                }
+                for item in result.get("files", [])
+            ]
+        }
+
+    if action in {"get_masters", "get_layouts"}:
+        if not presentation_id:
+            return {"error": "presentation_id is required for this action"}
+        presentation = slides_service.presentations().get(presentationId=presentation_id).execute()
+
+        if action == "get_masters":
+            masters = []
+            for master in presentation.get("masters", []):
+                master_props = master.get("masterProperties", {})
+                masters.append({
+                    "master_id": master.get("objectId"),
+                    "display_name": master_props.get("displayName"),
+                    "page_type": master.get("pageType"),
+                })
+            return {
+                "presentation_id": presentation_id,
+                "master_count": len(masters),
+                "masters": masters,
+            }
+
+        layouts = []
+        for layout in presentation.get("layouts", []):
+            layout_props = layout.get("layoutProperties", {})
+            current_master_id = layout_props.get("masterObjectId")
+            if master_id and current_master_id != master_id:
+                continue
+            layouts.append({
+                "layout_id": layout.get("objectId"),
+                "name": layout_props.get("name"),
+                "display_name": layout_props.get("displayName"),
+                "master_id": current_master_id,
+            })
+        return {
+            "presentation_id": presentation_id,
+            "master_id": master_id,
+            "layout_count": len(layouts),
+            "layouts": layouts,
+        }
+
+    if not presentation_id:
+        return {"error": "presentation_id is required for this action"}
+
+    if action == "get":
+        presentation = slides_service.presentations().get(presentationId=presentation_id).execute()
+        slides = presentation.get("slides", [])
+        parsed_slides = []
+        for slide in slides:
+            text_content = _extract_slide_text(slide.get("pageElements", []))
+            parsed_slides.append({
+                "page_id": slide.get("objectId"),
+                "layout_id": slide.get("slideProperties", {}).get("layoutObjectId"),
+                "master_id": slide.get("slideProperties", {}).get("masterObjectId"),
+                "text_elements": text_content,
+                "text": "\n".join(text_content),
+            })
+        return {
+            "presentation_id": presentation_id,
+            "title": presentation.get("title"),
+            "slide_count": len(slides),
+            "slides": parsed_slides,
+            "url": _presentation_url(presentation_id),
+        }
+
+    if action == "get_page":
+        if not page_id:
+            return {"error": "page_id is required for get_page action"}
+
+        presentation = slides_service.presentations().get(presentationId=presentation_id).execute()
+        page = next((slide for slide in presentation.get("slides", []) if slide.get("objectId") == page_id), None)
+        if not page:
+            return {"error": f"slide not found: {page_id}"}
+
+        elements = []
+        for element in page.get("pageElements", []):
+            element_type = "unknown"
+            if "shape" in element:
+                element_type = "shape"
+            elif "image" in element:
+                element_type = "image"
+            elif "table" in element:
+                element_type = "table"
+            elif "line" in element:
+                element_type = "line"
+            elif "video" in element:
+                element_type = "video"
+
+            text_content = _extract_slide_text([element])
+            elements.append({
+                "object_id": element.get("objectId"),
+                "type": element_type,
+                "size": element.get("size", {}),
+                "transform": element.get("transform", {}),
+                "text": text_content[0] if text_content else None,
+            })
+
+        return {
+            "presentation_id": presentation_id,
+            "page_id": page_id,
+            "layout_id": page.get("slideProperties", {}).get("layoutObjectId"),
+            "master_id": page.get("slideProperties", {}).get("masterObjectId"),
+            "elements": elements,
+        }
+
+    if action == "thumbnail":
+        if not page_id:
+            return {"error": "page_id is required for thumbnail action"}
+
+        size = (thumbnail_size or "MEDIUM").upper()
+        if size not in {"SMALL", "MEDIUM", "LARGE"}:
+            return {"error": "thumbnail_size must be one of SMALL, MEDIUM, LARGE"}
+
+        thumbnail = slides_service.presentations().pages().getThumbnail(
+            presentationId=presentation_id,
+            pageObjectId=page_id,
+            thumbnailProperties_thumbnailSize=size,
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "page_id": page_id,
+            "thumbnail_size": size,
+            "thumbnail_url": thumbnail.get("contentUrl"),
+        }
+
+    return {"error": f"Unknown action: {action}"}
+
+
+@mcp.tool()
+def slides_update(
+    presentation_id: str,
+    action: str = "raw",
+    requests: List[Dict[str, Any]] = None,
+    insertion_index: int = 0,
+    layout: str = "BLANK",
+    slide_id: str = None,
+    slide_ids: List[str] = None,
+    object_id: str = None,
+    object_id_mapping: Dict[str, str] = None,
+    text: str = None,
+    text_range: str = "ALL",
+    text_start_index: int = None,
+    text_end_index: int = None,
+    bold: bool = None,
+    italic: bool = None,
+    underline: bool = None,
+    font_size: float = None,
+    font_color: str = None,
+    font_family: str = None,
+    bullet_preset: str = "BULLET_DISC_CIRCLE_SQUARE",
+    x: float = None,
+    y: float = None,
+    width: float = None,
+    height: float = None,
+    x1: float = None,
+    y1: float = None,
+    x2: float = None,
+    y2: float = None,
+    apply_mode: str = "ABSOLUTE",
+    image_url: str = None,
+    color: str = None,
+    fill_color: str = None,
+    border_color: str = None,
+    border_width: float = None,
+    border_dash: str = None,
+    line_category: str = "STRAIGHT",
+    rows: int = 2,
+    columns: int = 2,
+    alignment: str = None,
+    line_spacing: float = None,
+    space_above: float = None,
+    space_below: float = None,
+    theme_id: str = None,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Mutate Google Slides presentations using high-level actions or raw requests.
+
+    Actions:
+        add_slide, delete_object, set_text, add_text_box, add_image, set_background, apply_theme,
+        format_text, format_shape, bullets, remove_bullets, duplicate, reorder, move,
+        speaker_notes, add_table, add_line, refresh_chart, update_paragraph, raw
+    """
+    slides_service = ctx.lifespan_context["slides_service"]
+    action = action.lower()
+
+    if not presentation_id:
+        return {"error": "presentation_id is required"}
+
+    presentation_url = _presentation_url(presentation_id)
+
+    if action == "raw":
+        if not requests:
+            return {"error": "requests is required for raw action"}
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": requests},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "applied_requests": len(requests),
+            "replies": result.get("replies", []),
+            "url": presentation_url,
+        }
+
+    if action == "add_slide":
+        layout_key = (layout or "BLANK").upper()
+        allowed_layouts = {
+            "BLANK",
+            "CAPTION_ONLY",
+            "TITLE",
+            "TITLE_AND_BODY",
+            "TITLE_AND_TWO_COLUMNS",
+            "TITLE_ONLY",
+            "SECTION_HEADER",
+            "SECTION_TITLE_AND_DESCRIPTION",
+            "BIG_NUMBER",
+        }
+        if layout_key not in allowed_layouts:
+            return {"error": f"Unsupported layout: {layout}"}
+
+        request = {
+            "createSlide": {
+                "insertionIndex": insertion_index,
+                "slideLayoutReference": {"predefinedLayout": layout_key},
+            }
+        }
+        if slide_id:
+            request["createSlide"]["objectId"] = slide_id
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [request]},
+        ).execute()
+        created_slide_id = (
+            result.get("replies", [{}])[0]
+            .get("createSlide", {})
+            .get("objectId", slide_id)
+        )
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "slide_id": created_slide_id,
+            "layout": layout_key,
+            "url": presentation_url,
+        }
+
+    if action == "format_text":
+        if not object_id:
+            return {"error": "object_id is required for format_text action"}
+
+        style: Dict[str, Any] = {}
+        fields: List[str] = []
+        if bold is not None:
+            style["bold"] = bold
+            fields.append("bold")
+        if italic is not None:
+            style["italic"] = italic
+            fields.append("italic")
+        if underline is not None:
+            style["underline"] = underline
+            fields.append("underline")
+        if font_size is not None:
+            style["fontSize"] = {"magnitude": font_size, "unit": "PT"}
+            fields.append("fontSize")
+        if font_color:
+            style["foregroundColor"] = {"opaqueColor": {"rgbColor": _parse_color(font_color)}}
+            fields.append("foregroundColor")
+        if font_family:
+            style["fontFamily"] = font_family
+            fields.append("fontFamily")
+
+        if not fields:
+            return {"error": "No style fields provided for format_text action"}
+
+        try:
+            target_text_range = _build_text_range(text_range, text_start_index, text_end_index)
+        except ValueError as e:
+            return {"error": str(e)}
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{
+                "updateTextStyle": {
+                    "objectId": object_id,
+                    "textRange": target_text_range,
+                    "style": style,
+                    "fields": ",".join(fields),
+                }
+            }]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "object_id": object_id,
+            "updated_fields": fields,
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "format_shape":
+        if not object_id:
+            return {"error": "object_id is required for format_shape action"}
+
+        shape_properties: Dict[str, Any] = {}
+        fields: List[str] = []
+        if fill_color:
+            shape_properties["shapeBackgroundFill"] = {
+                "solidFill": {"color": {"rgbColor": _parse_color(fill_color)}}
+            }
+            fields.append("shapeBackgroundFill.solidFill.color")
+
+        outline: Dict[str, Any] = {}
+        if border_color:
+            outline["outlineFill"] = {"solidFill": {"color": {"rgbColor": _parse_color(border_color)}}}
+            fields.append("outline.outlineFill.solidFill.color")
+        if border_width is not None:
+            outline["weight"] = {"magnitude": border_width, "unit": "PT"}
+            fields.append("outline.weight")
+        if border_dash:
+            outline["dashStyle"] = border_dash.upper()
+            fields.append("outline.dashStyle")
+        if outline:
+            shape_properties["outline"] = outline
+
+        if not fields:
+            return {"error": "No shape fields provided for format_shape action"}
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{
+                "updateShapeProperties": {
+                    "objectId": object_id,
+                    "shapeProperties": shape_properties,
+                    "fields": ",".join(fields),
+                }
+            }]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "object_id": object_id,
+            "updated_fields": fields,
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "delete_object":
+        if not object_id:
+            return {"error": "object_id is required for delete_object action"}
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{"deleteObject": {"objectId": object_id}}]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "deleted_object_id": object_id,
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "set_text":
+        if not object_id:
+            return {"error": "object_id is required for set_text action"}
+        if text is None:
+            return {"error": "text is required for set_text action"}
+
+        # Check if shape has existing text before attempting deleteText
+        # (deleteText on empty shape throws "startIndex must be less than endIndex")
+        presentation = slides_service.presentations().get(presentationId=presentation_id).execute()
+        has_text = False
+        for slide in presentation.get("slides", []):
+            for el in slide.get("pageElements", []):
+                if el.get("objectId") == object_id:
+                    shape_text = el.get("shape", {}).get("text", {})
+                    has_text = bool(shape_text.get("textElements"))
+                    break
+
+        update_requests = []
+        if has_text:
+            update_requests.append({
+                "deleteText": {
+                    "objectId": object_id,
+                    "textRange": {"type": "ALL"},
+                }
+            })
+        update_requests.append({
+            "insertText": {
+                "objectId": object_id,
+                "insertionIndex": 0,
+                "text": text,
+            }
+        })
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": update_requests},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "object_id": object_id,
+            "text_length": len(text),
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "bullets":
+        if not object_id:
+            return {"error": "object_id is required for bullets action"}
+        try:
+            target_text_range = _build_text_range(text_range, text_start_index, text_end_index)
+        except ValueError as e:
+            return {"error": str(e)}
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{
+                "createParagraphBullets": {
+                    "objectId": object_id,
+                    "textRange": target_text_range,
+                    "bulletPreset": (bullet_preset or "BULLET_DISC_CIRCLE_SQUARE").upper(),
+                }
+            }]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "object_id": object_id,
+            "bullet_preset": (bullet_preset or "BULLET_DISC_CIRCLE_SQUARE").upper(),
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "remove_bullets":
+        if not object_id:
+            return {"error": "object_id is required for remove_bullets action"}
+        try:
+            target_text_range = _build_text_range(text_range, text_start_index, text_end_index)
+        except ValueError as e:
+            return {"error": str(e)}
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{
+                "deleteParagraphBullets": {
+                    "objectId": object_id,
+                    "textRange": target_text_range,
+                }
+            }]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "object_id": object_id,
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "duplicate":
+        if not object_id:
+            return {"error": "object_id is required for duplicate action"}
+        duplicate_request = {"objectId": object_id}
+        if object_id_mapping:
+            duplicate_request["objectIds"] = object_id_mapping
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{"duplicateObject": duplicate_request}]},
+        ).execute()
+        duplicate_reply = result.get("replies", [{}])[0].get("duplicateObject", {})
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "source_object_id": object_id,
+            "object_ids": duplicate_reply.get("objectIdMappings", object_id_mapping),
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "reorder":
+        if not slide_ids:
+            return {"error": "slide_ids is required for reorder action"}
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{
+                "updateSlidesPosition": {
+                    "slideObjectIds": slide_ids,
+                    "insertionIndex": insertion_index,
+                }
+            }]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "slide_ids": slide_ids,
+            "insertion_index": insertion_index,
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "move":
+        if not object_id:
+            return {"error": "object_id is required for move action"}
+
+        presentation = slides_service.presentations().get(presentationId=presentation_id).execute()
+        element = _find_page_element(presentation, object_id)
+        if not element:
+            return {"error": f"object not found: {object_id}"}
+
+        current_transform = element.get("transform", {})
+        current_size = element.get("size", {})
+        base_width = current_size.get("width", {}).get("magnitude")
+        base_height = current_size.get("height", {}).get("magnitude")
+        current_scale_x = current_transform.get("scaleX", 1.0)
+        current_scale_y = current_transform.get("scaleY", 1.0)
+        current_abs_width = (base_width * current_scale_x) if base_width else None
+        current_abs_height = (base_height * current_scale_y) if base_height else None
+
+        mode = (apply_mode or "ABSOLUTE").upper()
+        if mode not in {"ABSOLUTE", "RELATIVE"}:
+            return {"error": "apply_mode must be ABSOLUTE or RELATIVE"}
+
+        if mode == "ABSOLUTE":
+            scale_x = current_scale_x
+            scale_y = current_scale_y
+            if width is not None and base_width:
+                scale_x = _pt_to_emu(width) / base_width
+            if height is not None and base_height:
+                scale_y = _pt_to_emu(height) / base_height
+            translate_x = _pt_to_emu(x) if x is not None else current_transform.get("translateX", 0)
+            translate_y = _pt_to_emu(y) if y is not None else current_transform.get("translateY", 0)
+        else:
+            scale_x = 1.0
+            scale_y = 1.0
+            if width is not None and current_abs_width:
+                scale_x = _pt_to_emu(width) / current_abs_width
+            if height is not None and current_abs_height:
+                scale_y = _pt_to_emu(height) / current_abs_height
+            translate_x = _pt_to_emu(x) if x is not None else 0
+            translate_y = _pt_to_emu(y) if y is not None else 0
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{
+                "updatePageElementTransform": {
+                    "objectId": object_id,
+                    "applyMode": mode,
+                    "transform": {
+                        "scaleX": scale_x,
+                        "scaleY": scale_y,
+                        "translateX": translate_x,
+                        "translateY": translate_y,
+                        "unit": "EMU",
+                    },
+                }
+            }]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "object_id": object_id,
+            "apply_mode": mode,
+            "position_pt": {"x": x, "y": y, "width": width, "height": height},
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "speaker_notes":
+        if not slide_id:
+            return {"error": "slide_id is required for speaker_notes action"}
+        if text is None:
+            return {"error": "text is required for speaker_notes action"}
+
+        presentation = slides_service.presentations().get(presentationId=presentation_id).execute()
+        slide = next((s for s in presentation.get("slides", []) if s.get("objectId") == slide_id), None)
+        if not slide:
+            return {"error": f"slide not found: {slide_id}"}
+
+        notes_object_id = _speaker_notes_object_id(slide)
+        if not notes_object_id:
+            return {"error": f"speaker notes shape not found for slide: {slide_id}"}
+
+        update_requests = [
+            {"deleteText": {"objectId": notes_object_id, "textRange": {"type": "ALL"}}},
+            {"insertText": {"objectId": notes_object_id, "insertionIndex": 0, "text": text}},
+        ]
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": update_requests},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "slide_id": slide_id,
+            "notes_object_id": notes_object_id,
+            "text_length": len(text),
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "add_text_box":
+        if not slide_id:
+            return {"error": "slide_id is required for add_text_box action"}
+        if text is None:
+            return {"error": "text is required for add_text_box action"}
+
+        x_pt = x if x is not None else 0
+        y_pt = y if y is not None else 0
+        width_pt = width if width is not None else 200
+        height_pt = height if height is not None else 100
+        text_box_id = object_id or f"textbox_{int(time.time() * 1000)}"
+        update_requests = [
+            {
+                "createShape": {
+                    "objectId": text_box_id,
+                    "shapeType": "TEXT_BOX",
+                    "elementProperties": {
+                        "pageObjectId": slide_id,
+                        "size": {
+                            "width": {"magnitude": _pt_to_emu(width_pt), "unit": "EMU"},
+                            "height": {"magnitude": _pt_to_emu(height_pt), "unit": "EMU"},
+                        },
+                        "transform": {
+                            "scaleX": 1,
+                            "scaleY": 1,
+                            "translateX": _pt_to_emu(x_pt),
+                            "translateY": _pt_to_emu(y_pt),
+                            "unit": "EMU",
+                        },
+                    },
+                }
+            },
+            {
+                "insertText": {
+                    "objectId": text_box_id,
+                    "insertionIndex": 0,
+                    "text": text,
+                }
+            },
+        ]
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": update_requests},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "slide_id": slide_id,
+            "object_id": text_box_id,
+            "position_pt": {"x": x_pt, "y": y_pt, "width": width_pt, "height": height_pt},
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "add_image":
+        if not slide_id:
+            return {"error": "slide_id is required for add_image action"}
+        if not image_url:
+            return {"error": "image_url is required for add_image action"}
+
+        x_pt = x if x is not None else 0
+        y_pt = y if y is not None else 0
+        width_pt = width if width is not None else 200
+        height_pt = height if height is not None else 100
+        image_id = object_id or f"image_{int(time.time() * 1000)}"
+        update_requests = [{
+            "createImage": {
+                "objectId": image_id,
+                "url": image_url,
+                "elementProperties": {
+                    "pageObjectId": slide_id,
+                    "size": {
+                        "width": {"magnitude": _pt_to_emu(width_pt), "unit": "EMU"},
+                        "height": {"magnitude": _pt_to_emu(height_pt), "unit": "EMU"},
+                    },
+                    "transform": {
+                        "scaleX": 1,
+                        "scaleY": 1,
+                        "translateX": _pt_to_emu(x_pt),
+                        "translateY": _pt_to_emu(y_pt),
+                        "unit": "EMU",
+                    },
+                },
+            }
+        }]
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": update_requests},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "slide_id": slide_id,
+            "object_id": image_id,
+            "position_pt": {"x": x_pt, "y": y_pt, "width": width_pt, "height": height_pt},
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "add_table":
+        if not slide_id:
+            return {"error": "slide_id is required for add_table action"}
+        if rows < 1 or columns < 1:
+            return {"error": "rows and columns must be >= 1"}
+
+        x_pt = x if x is not None else 0
+        y_pt = y if y is not None else 0
+        width_pt = width if width is not None else 400
+        height_pt = height if height is not None else 200
+        table_id = object_id or f"table_{int(time.time() * 1000)}"
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{
+                "createTable": {
+                    "objectId": table_id,
+                    "rows": rows,
+                    "columns": columns,
+                    "elementProperties": {
+                        "pageObjectId": slide_id,
+                        "size": {
+                            "width": {"magnitude": _pt_to_emu(width_pt), "unit": "EMU"},
+                            "height": {"magnitude": _pt_to_emu(height_pt), "unit": "EMU"},
+                        },
+                        "transform": {
+                            "scaleX": 1,
+                            "scaleY": 1,
+                            "translateX": _pt_to_emu(x_pt),
+                            "translateY": _pt_to_emu(y_pt),
+                            "unit": "EMU",
+                        },
+                    },
+                }
+            }]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "slide_id": slide_id,
+            "object_id": table_id,
+            "rows": rows,
+            "columns": columns,
+            "position_pt": {"x": x_pt, "y": y_pt, "width": width_pt, "height": height_pt},
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "add_line":
+        if not slide_id:
+            return {"error": "slide_id is required for add_line action"}
+        if None in {x1, y1, x2, y2}:
+            return {"error": "x1, y1, x2, y2 are required for add_line action"}
+        category = (line_category or "STRAIGHT").upper()
+        if category not in {"STRAIGHT", "BENT", "CURVED"}:
+            return {"error": "line_category must be STRAIGHT, BENT, or CURVED"}
+
+        line_id = object_id or f"line_{int(time.time() * 1000)}"
+        width_emu = max(1, abs(_pt_to_emu(x2) - _pt_to_emu(x1)))
+        height_emu = max(1, abs(_pt_to_emu(y2) - _pt_to_emu(y1)))
+        tx_emu = min(_pt_to_emu(x1), _pt_to_emu(x2))
+        ty_emu = min(_pt_to_emu(y1), _pt_to_emu(y2))
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{
+                "createLine": {
+                    "objectId": line_id,
+                    "lineCategory": category,
+                    "elementProperties": {
+                        "pageObjectId": slide_id,
+                        "size": {
+                            "width": {"magnitude": width_emu, "unit": "EMU"},
+                            "height": {"magnitude": height_emu, "unit": "EMU"},
+                        },
+                        "transform": {
+                            "scaleX": 1,
+                            "scaleY": 1,
+                            "translateX": tx_emu,
+                            "translateY": ty_emu,
+                            "unit": "EMU",
+                        },
+                    },
+                }
+            }]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "slide_id": slide_id,
+            "object_id": line_id,
+            "line_category": category,
+            "points_pt": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "set_background":
+        if not slide_id:
+            return {"error": "slide_id is required for set_background action"}
+        if not color:
+            return {"error": "color is required for set_background action"}
+
+        rgb_color = _parse_color(color)
+        update_requests = [{
+            "updatePageProperties": {
+                "objectId": slide_id,
+                "pageProperties": {
+                    "pageBackgroundFill": {
+                        "solidFill": {"color": {"rgbColor": rgb_color}}
+                    }
+                },
+                "fields": "pageBackgroundFill.solidFill.color",
+            }
+        }]
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": update_requests},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "slide_id": slide_id,
+            "color": color,
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "update_paragraph":
+        if not object_id:
+            return {"error": "object_id is required for update_paragraph action"}
+        style: Dict[str, Any] = {}
+        fields: List[str] = []
+
+        if alignment:
+            alignment_map = {"LEFT": "START", "CENTER": "CENTER", "RIGHT": "END", "JUSTIFIED": "JUSTIFIED"}
+            alignment_key = alignment.upper()
+            style["alignment"] = alignment_map.get(alignment_key, alignment_key)
+            fields.append("alignment")
+        if line_spacing is not None:
+            style["lineSpacing"] = line_spacing
+            fields.append("lineSpacing")
+        if space_above is not None:
+            style["spaceAbove"] = {"magnitude": space_above, "unit": "PT"}
+            fields.append("spaceAbove")
+        if space_below is not None:
+            style["spaceBelow"] = {"magnitude": space_below, "unit": "PT"}
+            fields.append("spaceBelow")
+        if not fields:
+            return {"error": "No paragraph fields provided for update_paragraph action"}
+
+        try:
+            target_text_range = _build_text_range(text_range, text_start_index, text_end_index)
+        except ValueError as e:
+            return {"error": str(e)}
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{
+                "updateParagraphStyle": {
+                    "objectId": object_id,
+                    "textRange": target_text_range,
+                    "style": style,
+                    "fields": ",".join(fields),
+                }
+            }]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "object_id": object_id,
+            "updated_fields": fields,
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "apply_theme":
+        if not theme_id:
+            return {"error": "theme_id is required for apply_theme action"}
+
+        presentation = slides_service.presentations().get(presentationId=presentation_id).execute()
+        slides = presentation.get("slides", [])
+        if not slides:
+            return {"error": "presentation has no slides"}
+
+        update_requests = [{
+            "updateSlideProperties": {
+                "objectId": slide.get("objectId"),
+                "slideProperties": {"masterObjectId": theme_id},
+                "fields": "masterObjectId",
+            }
+        } for slide in slides]
+
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": update_requests},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "theme_id": theme_id,
+            "updated_slides": len(slides),
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    if action == "refresh_chart":
+        if not object_id:
+            return {"error": "object_id is required for refresh_chart action"}
+        result = slides_service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": [{"refreshSheetsChart": {"objectId": object_id}}]},
+        ).execute()
+        return {
+            "presentation_id": presentation_id,
+            "action": action,
+            "object_id": object_id,
+            "reply_count": len(result.get("replies", [])),
+            "url": presentation_url,
+        }
+
+    return {"error": f"Unknown action: {action}"}
+
+
+@mcp.tool()
+def slides_merge(
+    presentation_id: str,
+    action: str,
+    replacements: Dict[str, str] = None,
+    spreadsheet_id: str = None,
+    chart_id: int = None,
+    contains_text: str = None,
+    link_chart: bool = True,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Merge/template operations across all slides.
+
+    Actions:
+        text: replaceAllText for placeholders across the deck
+        image: replaceAllShapesWithImage for placeholder shapes
+        chart: replaceAllShapesWithSheetsChart for placeholder shapes
+    """
+    slides_service = ctx.lifespan_context["slides_service"]
+    action = action.lower()
+
+    if not presentation_id:
+        return {"error": "presentation_id is required"}
+
+    requests: List[Dict[str, Any]] = []
+
+    if action == "text":
+        if not replacements:
+            return {"error": "replacements is required for text action"}
+        for placeholder, value in replacements.items():
+            requests.append({
+                "replaceAllText": {
+                    "containsText": {"text": placeholder, "matchCase": True},
+                    "replaceText": value,
+                }
+            })
+
+    elif action == "image":
+        if not replacements:
+            return {"error": "replacements is required for image action"}
+        for placeholder, image in replacements.items():
+            requests.append({
+                "replaceAllShapesWithImage": {
+                    "containsText": {"text": placeholder, "matchCase": True},
+                    "imageUrl": image,
+                    "imageReplaceMethod": "CENTER_INSIDE",
+                }
+            })
+
+    elif action == "chart":
+        if not spreadsheet_id:
+            return {"error": "spreadsheet_id is required for chart action"}
+        if chart_id is None:
+            return {"error": "chart_id is required for chart action"}
+        if not contains_text:
+            return {"error": "contains_text is required for chart action"}
+        requests.append({
+            "replaceAllShapesWithSheetsChart": {
+                "containsText": {"text": contains_text, "matchCase": True},
+                "spreadsheetId": spreadsheet_id,
+                "chartId": chart_id,
+                "linkingMode": "LINKED" if link_chart else "NOT_LINKED_IMAGE",
+            }
+        })
+    else:
+        return {"error": f"Unknown action: {action}"}
+
+    result = slides_service.presentations().batchUpdate(
+        presentationId=presentation_id,
+        body={"requests": requests},
+    ).execute()
+
+    changes: List[Dict[str, Any]] = []
+    total_changed = 0
+    for reply in result.get("replies", []):
+        for key in ["replaceAllText", "replaceAllShapesWithImage", "replaceAllShapesWithSheetsChart"]:
+            if key in reply:
+                changed = reply[key].get("occurrencesChanged", 0)
+                total_changed += changed
+                changes.append({"operation": key, "occurrences_changed": changed})
+                break
+
+    return {
+        "presentation_id": presentation_id,
+        "action": action,
+        "request_count": len(requests),
+        "occurrences_changed": total_changed,
+        "changes": changes,
+        "url": _presentation_url(presentation_id),
+    }
+
+
 @mcp.tool()
 def batch_update(spreadsheet_id: str, requests: List[Dict[str, Any]], ctx: Context = None) -> Dict[str, Any]:
     """
@@ -3068,7 +4203,7 @@ def batch_update(spreadsheet_id: str, requests: List[Dict[str, Any]], ctx: Conte
     Pass raw Google Sheets API request objects.
     See: https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service = ctx.lifespan_context["sheets_service"]
     if not requests:
         return {"error": "requests cannot be empty"}
     return sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
@@ -3079,10 +4214,10 @@ def batch_update(spreadsheet_id: str, requests: List[Dict[str, Any]], ctx: Conte
 # =============================================================================
 
 @mcp.resource("spreadsheet://{spreadsheet_id}/info")
-def get_spreadsheet_info(spreadsheet_id: str) -> str:
+async def get_spreadsheet_info(spreadsheet_id: str, ctx: Context) -> str:
     """Get spreadsheet info as JSON."""
-    context = mcp.get_lifespan_context()
-    ss = context.sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    sheets_service = ctx.lifespan_context["sheets_service"]
+    ss = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     return json.dumps({
         "title": ss.get('properties', {}).get('title', 'Unknown'),
         "sheets": [{"title": s['properties']['title'], "sheetId": s['properties']['sheetId']} for s in ss.get('sheets', [])]
