@@ -17,7 +17,7 @@
 
 ## 🤔 What is this?
 
-`mcp-google-sheets` is a Python-based MCP server that acts as a bridge between any MCP-compatible client (like Claude Desktop) and the Google Sheets API. It allows you to interact with your Google Spreadsheets using a defined set of tools, enabling powerful automation and data manipulation workflows driven by AI.
+`mcp-google-sheets` is a Python-based MCP server that acts as a bridge between any MCP-compatible client (like Claude Desktop) and Google Sheets + Google Slides APIs. It allows you to interact with your Google Spreadsheets and Presentations using a defined set of tools, enabling powerful automation and data manipulation workflows driven by AI.
 
 ---
 
@@ -85,7 +85,7 @@ You're ready! Start issuing commands via your MCP client.
 
 ## ✨ Key Features
 
-*   **Seamless Integration:** Connects directly to Google Drive & Google Sheets APIs.
+*   **Seamless Integration:** Connects directly to Google Drive, Google Sheets, and Google Slides APIs.
 *   **Comprehensive Tools:** Offers a wide range of operations (CRUD, listing, batching, sharing, formatting, etc.).
 *   **Flexible Authentication:** Supports **Service Accounts (recommended)**, OAuth 2.0, and direct credential injection via environment variables.
 *   **Easy Deployment:** Run instantly with `uvx` (zero-install feel) or clone for development using `uv`.
@@ -205,6 +205,28 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
 *   **`spreadsheet://{spreadsheet_id}/info`**: Get basic metadata about a Google Spreadsheet.
     *   _Returns:_ JSON string with spreadsheet information.
 
+### Google Slides Tools
+
+The server also exposes tools for managing and editing Google Slides presentations:
+
+*   **`slides_manage`** (read/create operations):
+    *   Actions: `create`, `list`, `get`, `get_page`, `thumbnail`, `get_masters`, `get_layouts`
+    *   Typical usage:
+        *   create/list presentations
+        *   inspect slides and page elements
+        *   fetch slide thumbnails
+        *   discover available master/layout IDs for templating
+
+*   **`slides_update`** (mutating operations):
+    *   Core actions: `raw`, `add_slide`, `delete_object`, `set_text`, `add_text_box`, `add_image`, `set_background`, `apply_theme`
+    *   Advanced actions: `format_text`, `format_shape`, `bullets`, `remove_bullets`, `duplicate`, `reorder`, `move`, `speaker_notes`, `add_table`, `add_line`, `refresh_chart`, `update_paragraph`
+
+*   **`slides_merge`** (template merge across all slides):
+    *   `action="text"`: placeholder replacement with `replaceAllText`
+    *   `action="image"`: placeholder shape replacement with `replaceAllShapesWithImage`
+    *   `action="chart"`: placeholder shape replacement with linked/unlinked Sheets chart using `replaceAllShapesWithSheetsChart`
+    *   Useful for mail-merge style deck generation (`{{company}}`, `{{date}}`, `{{logo}}`, etc.)
+
 ---
 
 ## ☁️ Google Cloud Platform Setup (Detailed)
@@ -215,6 +237,7 @@ This setup is **required** before running the server.
 2.  **Enable APIs:** Navigate to "APIs & Services" -> "Library". Search for and enable:
     *   `Google Sheets API`
     *   `Google Drive API`
+    *   `Google Slides API`
 3.  **Configure Credentials:** You need to choose *one* authentication method below (Service Account is recommended).
 
 ---
@@ -250,7 +273,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
 
 *   **Why?** For personal use or local development where interactive browser login is okay.
 *   **Steps:**
-    1.  **Configure OAuth Consent Screen:** In GCP Console -> "APIs & Services" -> "OAuth consent screen". Select "External", fill required info, add scopes (`.../auth/spreadsheets`, `.../auth/drive`), add test users if needed.
+    1.  **Configure OAuth Consent Screen:** In GCP Console -> "APIs & Services" -> "OAuth consent screen". Select "External", fill required info, add scopes (`.../auth/spreadsheets`, `.../auth/drive`, `.../auth/presentations`), add test users if needed.
     2.  **Create OAuth Client ID:** In GCP Console -> "APIs & Services" -> "Credentials". "+ CREATE CREDENTIALS" -> "OAuth client ID" -> Type: **Desktop app**. Name it. "CREATE". **Download JSON**.
     3.  **Set Environment Variables:**
         *   `CREDENTIALS_PATH`: Path to the downloaded OAuth credentials JSON file (default: `credentials.json`).
@@ -289,7 +312,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
     3.  Attached service account from metadata server (GKE, Compute Engine, etc.)
 *   **Setup:**
     *   **Local Development:** 
-        1. Run `gcloud auth application-default login --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive` once
+        1. Run `gcloud auth application-default login --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/presentations` once
         2. Set a quota project: `gcloud auth application-default set-quota-project <project_id>` (replace `<project_id>` with your Google Cloud project ID)
     *   **Google Cloud:** Attach a service account to your compute resource
     *   **Environment Variable:** Set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json` (Google's standard)
@@ -488,7 +511,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
 }
 ```
 *Prerequisites:* 
-1. *Run `gcloud auth application-default login --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive` first.*
+1. *Run `gcloud auth application-default login --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/presentations` first.*
 2. *Set quota project: `gcloud auth application-default set-quota-project <project_id>`*
 
 **🍎 macOS Note:** If you get a `spawn uvx ENOENT` error, replace `"command": "uvx"` with `"command": "/Users/yourusername/.local/bin/uvx"` (replace `yourusername` with your actual username).
