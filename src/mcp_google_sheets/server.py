@@ -927,6 +927,12 @@ def sheets_data(
     elif action == "write":
         if not data:
             return {"error": "data is required for write action"}
+        # MCP framework may serialize List[List[Any]] as a JSON string due to Union type
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (json.JSONDecodeError, ValueError):
+                return {"error": "data must be a list of lists or a valid JSON string representing one"}
         if not range:
             return {"error": "range is required for write action"}
 
