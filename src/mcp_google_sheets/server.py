@@ -800,6 +800,7 @@ async def spreadsheet_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]
             "drive_service": drive_service,
             "slides_service": slides_service,
             "folder_id": DRIVE_FOLDER_ID or None,
+            "credentials": creds,
         }
     finally:
         pass
@@ -2907,6 +2908,56 @@ def drive(
 # =============================================================================
 # UTILITY TOOLS
 # =============================================================================
+
+@mcp.tool()
+def google_identity(ctx: Context = None) -> Dict[str, Any]:
+    """
+    Report which Google identity this server authenticates as.
+
+    Call this whenever a Sheets, Drive or Slides request is denied. Denials are
+    usually not a broken setup: a service account reaches only the files that
+    have been shared with its own address, and it inherits nothing from the
+    person who asked. The fix is for someone to share the file or folder with
+    the address returned here. This server cannot request access itself —
+    creating an access request is not a Drive API operation at all.
+
+    Note that a missing share surfaces differently per API: the Sheets API
+    answers 403 "The caller does not have permission", while the Drive API
+    answers 404 "File not found", because it will not confirm that a file it
+    cannot see exists. Neither means the spreadsheet id is wrong.
+    """
+    lifespan = ctx.lifespan_context
+    creds = lifespan.get("credentials")
+
+    result: Dict[str, Any] = {
+        "auth_type": "service_account" if isinstance(creds, service_account.Credentials) else "oauth_user",
+        "email": getattr(creds, "service_account_email", None),
+        "project_id": getattr(creds, "project_id", None),
+        "scopes": list(getattr(creds, "scopes", None) or []),
+        "drive_folder_id": lifespan.get("folder_id"),
+    }
+
+    # Ask Google rather than trust the local credential fields: this is correct
+    # for every auth mode, and a successful answer also proves the credentials
+    # are live rather than merely well-formed.
+    try:
+        user = lifespan["drive_service"].about().get(fields="user").execute().get("user", {})
+        result["email"] = user.get("emailAddress") or result["email"]
+        result["display_name"] = user.get("displayName")
+        result["verified_by"] = "drive.about.get"
+    except Exception as exc:
+        result["verified_by"] = None
+        result["verification_error"] = str(exc)
+
+    if result.get("email"):
+        result["how_to_grant_access"] = (
+            f"Share the file or folder with {result['email']} in the Google Drive "
+            "share dialog, Viewer to read or Editor to write. Access applies "
+            "immediately and Google sends no confirmation request."
+        )
+
+    return result
+
 
 @mcp.tool()
 def get_presets(ctx: Context = None) -> Dict[str, Any]:
