@@ -652,6 +652,58 @@ def _grid_range(sheet_id: int, a1_range: str) -> Dict[str, Any]:
     return gr
 
 
+def _apply_merges(
+    values: List[List[Any]],
+    read_range: str,
+    merges: List[Dict[str, Any]],
+    fill: bool = False
+) -> List[Dict[str, Any]]:
+    """Describe the merges overlapping a values() read, optionally filling covered cells.
+
+    read_range is the range the values API echoed back (e.g. "'My Sheet'!B2:F20"),
+    which anchors values[0][0]. Merge GridRanges are sheet-absolute.
+    """
+    a1 = read_range.rsplit('!', 1)[-1]
+    row0, row_end, col0, col_end = _parse_a1(a1)
+    out = []
+    for m in merges:
+        m_r0, m_r1 = m.get("startRowIndex", 0), m["endRowIndex"]
+        m_c0, m_c1 = m.get("startColumnIndex", 0), m["endColumnIndex"]
+        # Skip merges entirely outside the read window
+        if (row_end is not None and m_r0 >= row_end) or m_r1 <= row0:
+            continue
+        if (col_end is not None and m_c0 >= col_end) or m_c1 <= col0:
+            continue
+        anchor_inside = m_r0 >= row0 and m_c0 >= col0
+        value = None
+        if anchor_inside:
+            r, c = m_r0 - row0, m_c0 - col0
+            if r < len(values) and c < len(values[r]):
+                value = values[r][c]
+        entry = {
+            "range": f"{_index_to_col(m_c0)}{m_r0 + 1}:{_index_to_col(m_c1 - 1)}{m_r1}",
+            "value": value,
+        }
+        if not anchor_inside:
+            entry["anchor_outside_range"] = True
+        out.append(entry)
+
+        if fill and anchor_inside and value not in (None, ""):
+            # Clip to the read window, then copy the anchor value into every covered cell
+            r_from, c_from = m_r0 - row0, m_c0 - col0
+            r_to = (min(m_r1, row_end) if row_end is not None else m_r1) - row0
+            c_to = (min(m_c1, col_end) if col_end is not None else m_c1) - col0
+            while len(values) < r_to:
+                values.append([])
+            for r in range(r_from, r_to):
+                row = values[r]
+                if len(row) < c_to:
+                    row.extend([""] * (c_to - len(row)))
+                for c in range(c_from, c_to):
+                    row[c] = value
+    return out
+
+
 def _resolve_number_format(fmt: str) -> str:
     """Resolve a number format preset or return as-is."""
     return NUMBER_FORMATS.get(fmt.lower(), fmt) if fmt else fmt
@@ -822,6 +874,8 @@ def sheets_data(
     range: Optional[str] = None,
     # Read options
     include_formulas: bool = False,
+    include_merges: bool = False,
+    fill_merged: bool = False,
     # Write options (also accepts string for diagram action)
     data: Optional[Union[List[List[Any]], str]] = None,
     style: Optional[str] = None,
@@ -846,7 +900,9 @@ def sheets_data(
     Unified data operations for Google Sheets.
 
     Actions:
-        read: Get cell values (add include_formulas=True for formulas)
+        read: Get cell values (add include_formulas=True for formulas).
+              include_merges=True also returns merged ranges; fill_merged=True copies each
+              merge's top-left value into the cells it covers (the API leaves them blank)
         write: Write data with optional table styling and column type formatting
         clear: Clear cell contents (and optionally formatting)
         search: Filter/query rows with conditions
@@ -871,6 +927,9 @@ def sheets_data(
     Examples:
         # Read data
         sheets_data(id, "Sheet1", "read", "A1:D10")
+
+        # Read data, listing merged ranges and filling merged cells with their value
+        sheets_data(id, "Sheet1", "read", "A1:D10", fill_merged=True)
 
         # DOCUMENT MODE - Multiple sections, no table styling (just raw data)
         sheets_data(id, "Sheet1", "write", "A1", data=[
@@ -922,7 +981,15 @@ def sheets_data(
             result = sheets_service.spreadsheets().values().get(
                 spreadsheetId=spreadsheet_id, range=full_range
             ).execute()
-        return {'range': full_range, 'values': result.get('values', [])}
+        values = result.get('values', [])
+        response = {'range': full_range, 'values': values}
+        if include_merges or fill_merged:
+            sp = sheets_service.spreadsheets().get(
+                spreadsheetId=spreadsheet_id, ranges=[full_range], fields='sheets(merges)'
+            ).execute()
+            merges = (sp.get('sheets') or [{}])[0].get('merges', [])
+            response['merges'] = _apply_merges(values, result.get('range', full_range), merges, fill=fill_merged)
+        return response
 
     # === WRITE ===
     elif action == "write":
